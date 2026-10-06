@@ -111,6 +111,28 @@ The loader supports plaintext JSONL and concatenated Zstandard frames. It never 
 
 Ask DSH to load the `explain-with-notebook` skill, point it at a trajectory, and finish by calling `marimo_export_html`.
 
+## Example: explain a real DSH run
+
+The screenshot below is from the first end-to-end test: the agent analyzed the DSH session that built this plugin while the live marimo notebook remained open beside the chat.
+
+![DSH chat beside a live marimo session explanation](docs/assets/session-explanation.webp)
+
+The generated report included:
+
+- the complete durable event timeline;
+- tool-call counts, failures, and the slowest completed calls;
+- assistant attempts without committed messages as retry/abandonment evidence;
+- input, cache-read, cache-write, output, reasoning, and total token usage;
+- an executive summary computed from the trajectory rather than copied into prose.
+
+Try it with a prompt like:
+
+> Use `explain-with-notebook` to explain this DSH session, including a timeline, tool calls, retries, and token usage. Export the result to HTML.
+
+Or start from the reusable [example notebook](examples/explain-session.py). Set its trajectory field to a local `session.vN.jsonl.zstd` file, then run its cells. A captured [static HTML example](examples/session-explanation.html) is also included so the result can be reviewed without starting DSH or marimo.
+
+The counts in the screenshot are a point-in-time snapshot of an active session. Rerunning the notebook's loading cell reads the current trajectory and recomputes every table and summary.
+
 ## Security model
 
 A marimo code-mode notebook executes arbitrary Python with the same operating-system authority as the DSH process. Treat it as shell-equivalent.

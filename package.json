@@ -22,6 +22,8 @@
     "cordis.patch.yml",
     "python",
     "skills",
+    "examples",
+    "docs/assets",
     "README.md",
     "LICENSE"
   ],
