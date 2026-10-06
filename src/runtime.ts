@@ -32,9 +32,9 @@ export function workspacePath(root: string, value: string, label: string): strin
   return candidate
 }
 
-async function run(command: string, args: readonly string[], cwd: string, timeoutMs: number): Promise<void> {
+async function run(command: string, args: readonly string[], cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<void> {
   await new Promise<void>((resolvePromise, reject) => {
-    const child = spawn(command, args, { cwd, stdio: ['ignore', 'pipe', 'pipe'] })
+    const child = spawn(command, args, { cwd, env: env === undefined ? process.env : { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
     const stdout: Buffer[] = []
     const stderr: Buffer[] = []
     child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk))
@@ -184,7 +184,10 @@ export class MarimoRuntime {
   async exportHtml(output = this.exportPath): Promise<string> {
     const target = workspacePath(this.cwd, output, 'export path')
     await mkdir(dirname(target), { recursive: true })
-    await run(this.python(), ['-m', 'marimo', 'export', 'html', this.notebook, '-o', target], this.cwd, this.config.startupTimeoutMs)
+    const pythonPath = join(PACKAGE_ROOT, 'python')
+    await run(this.python(), ['-m', 'marimo', 'export', 'html', this.notebook, '-o', target], this.cwd, this.config.startupTimeoutMs, {
+      PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${delimiter}${process.env.PYTHONPATH}` : pythonPath,
+    })
     return target
   }
 
