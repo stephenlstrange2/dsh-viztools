@@ -1,0 +1,14 @@
+__pycache__
+**/__pycache__
+python/dsh_viztools/__pycache__
+*.pyc
+**/*.pyc
+*.pyo
+**/*.pyo
+src/
+test/
+coverage/
+dist/
+.dsh/
+tsconfig.json
+tsdown.config.ts

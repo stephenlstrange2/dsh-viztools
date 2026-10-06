@@ -1,0 +1,6 @@
+- id: ui-sidebar-browser
+  disabled: false
+- insert:
+    - id: dsh-viztools
+      name: dsh-viztools
+
