@@ -16,17 +16,42 @@ def _():
 def _(Path, mo):
     session_path = mo.ui.text(
         value=str(Path.home() / ".dsh/sessions/<workspace>/<session>/session.v4.jsonl.zstd"),
-        label="DSH trajectory containing an exit_plan_mode submission",
+        label="DSH trajectory",
         full_width=True,
     )
-    session_path
-    return (session_path,)
+    plan_source = mo.ui.dropdown(
+        options={
+            "Use durable exit_plan_mode plan": "submitted",
+            "Use plan text below": "user-provided",
+            "Use reconstructed plan text below": "reconstructed",
+        },
+        value="submitted",
+        label="Plan source",
+    )
+    plan_text = mo.ui.text_area(
+        value="",
+        label="Optional plan Markdown (start with # heading)",
+        full_width=True,
+        rows=10,
+    )
+    boundary_seq = mo.ui.number(
+        value=None,
+        start=0,
+        label="Optional execution boundary sequence",
+    )
+    mo.vstack([session_path, plan_source, plan_text, boundary_seq])
+    return boundary_seq, plan_source, plan_text, session_path
 
 
 @app.cell
-def _(load_session, session_path):
+def _(boundary_seq, load_session, plan_source, plan_text, session_path):
     run = load_session(session_path.value)
-    explanation = run.explain_plan()
+    use_text = plan_source.value != "submitted" and bool(plan_text.value.strip())
+    explanation = run.explain_plan(
+        plan_markdown=plan_text.value if use_text else None,
+        source=plan_source.value if use_text else "user-provided",
+        boundary_seq=int(boundary_seq.value) if boundary_seq.value is not None else None,
+    )
     return explanation, run
 
 
@@ -34,15 +59,28 @@ def _(load_session, session_path):
 def _(explanation, mo):
     summary = explanation.summary
     servers = ", ".join(summary["mcp_servers"]) or "none"
+    source_labels = {
+        "submitted": "Submitted DSH plan",
+        "user-provided": "User-provided plan; approval not observed",
+        "reconstructed": "Reconstructed plan; not an approved plan",
+        "not-observed": "No plan observed — execution evidence only",
+    }
+    comparison = "available" if summary["comparison_available"] else "unavailable until a plan is provided"
     mo.md(
         f"""
         # Plan execution report: {explanation.plan['title']}
 
-        The trajectory records **{summary['execution_calls']:,} post-submission tool calls**:
+        **Plan source:** {source_labels[summary['plan_source']]}
+
+        **Comparison:** {comparison}
+
+        **Execution boundary:** {summary['boundary']} (sequence {summary['boundary_seq']})
+
+        The trajectory records **{summary['execution_calls']:,} tool calls** after the selected boundary:
         **{summary['native_calls']:,} native** and **{summary['mcp_calls']:,} MCP** calls.
         **{summary['failed_calls']:,}** calls failed. Observed MCP servers: **{servers}**.
 
-        Attribution warning: call existence, ordering, results, and timing are direct log evidence.
+        Call existence, ordering, results, and timing are direct log evidence.
         Associations between calls and plan phases are keyword-based heuristics.
         """
     )
@@ -51,8 +89,17 @@ def _(explanation, mo):
 
 @app.cell
 def _(explanation, mo):
-    mo.md("## Submitted plan\nThis is the exact Markdown carried by `exit_plan_mode`.")
-    mo.md(explanation.plan["markdown"])
+    if explanation.plan["markdown"] is None:
+        plan_view = mo.md(
+            "## Plan comparison unavailable\nNo durable `exit_plan_mode` submission was observed. "
+            "The execution inventory below remains valid. Select a provided or reconstructed plan above to enable comparison."
+        )
+    else:
+        plan_view = mo.vstack([
+            mo.md("## Comparison plan\nThe source and approval status are shown above."),
+            mo.md(explanation.plan["markdown"]),
+        ])
+    plan_view
     return
 
 
@@ -66,7 +113,7 @@ def _(explanation, mo):
         }
         for phase in explanation.phases
     ]
-    mo.md("## Plan phases\nThese headings form the candidate execution phases.")
+    mo.md("## Plan phases\nEmpty when no comparison plan is available.")
     mo.ui.table(phase_rows, pagination=True, page_size=20, selection=None)
     return (phase_rows,)
 
@@ -80,7 +127,7 @@ def _(explanation, mo):
 
 @app.cell
 def _(explanation, mo):
-    mo.md("## MCP operations\nThis table separates each observed MCP server and operation.")
+    mo.md("## MCP operations\nThis remains useful even when no comparison plan exists.")
     mo.ui.table(explanation.mcp_inventory, pagination=True, page_size=20, selection=None)
     return
 
@@ -103,10 +150,7 @@ def _(explanation, mo):
         }
         for call in explanation.calls
     ]
-    mo.md(
-        "## Execution evidence\n"
-        "`heuristic` means keyword overlap with a plan phase; `not-observed` means the call is durable but no phase attribution is supported."
-    )
+    mo.md("## Execution evidence\nUnmapped calls remain visible rather than being discarded.")
     mo.ui.table(execution_rows, pagination=True, page_size=25, selection=None)
     return (execution_rows,)
 
@@ -122,11 +166,11 @@ def _(explanation, mo, summary):
         ## Variance and evidence notes
 
         - **{summary['heuristically_mapped_calls']:,}** calls have heuristic phase attribution.
-        - **{summary['unmapped_calls']:,}** calls remain unmapped; they may be unplanned work or simply lack enough textual evidence.
-        - Phases without a mapped tool call: **{', '.join(phases_without_mapped_calls) or 'none'}**.
+        - **{summary['unmapped_calls']:,}** calls remain unmapped.
+        - Phases without a mapped call: **{', '.join(phases_without_mapped_calls) or 'none'}**.
 
-        A phase without a mapped tool call is **not automatically skipped**: analysis, discussion,
-        or other prose-only work may leave no tool-call evidence.
+        Unmapped calls may be unplanned or insufficiently attributable. A phase without a mapped
+        tool call is not automatically skipped: prose-only work may leave no tool evidence.
         """
     )
     return (phases_without_mapped_calls,)

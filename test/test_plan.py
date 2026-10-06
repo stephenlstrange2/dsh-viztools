@@ -72,17 +72,55 @@ Run tests and confirm failures are fixed.
         self.assertEqual(ptc["transport"], "ptc")
         self.assertIn(ptc["attribution"], {"heuristic", "not-observed"})
 
-    def test_requires_a_submitted_plan(self) -> None:
+    def standard_mode_session(self):
         records = [
             {"version": 4},
-            {"type": "tool/call", "seq": 1, "time": 1, "data": {"callId": "x", "name": "read", "arguments": "{}"}},
+            {"type": "user/message", "seq": 1, "time": 1, "data": {"turn": 1, "message": {"content": [{"type": "text", "text": "build it"}]}}},
+            {"type": "tool/call", "seq": 2, "time": 2, "data": {"callId": "x", "name": "read", "arguments": json.dumps({"file_path": "src/api.py"})}},
+            {"type": "tool/result", "seq": 3, "time": 3, "data": {"message": {"toolCallId": "x", "isError": False, "content": []}}},
         ]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory, "session.v4.jsonl")
-            path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
-            session = load_session(path)
-        with self.assertRaisesRegex(ValueError, "no valid exit_plan_mode"):
-            explain_plan(session)
+        directory = tempfile.TemporaryDirectory()
+        path = Path(directory.name, "session.v4.jsonl")
+        path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
+        return directory, load_session(path)
+
+    def test_missing_plan_returns_execution_only_evidence(self) -> None:
+        directory, session = self.standard_mode_session()
+        self.addCleanup(directory.cleanup)
+        explanation = explain_plan(session)
+        self.assertEqual(explanation.plan["source"], "not-observed")
+        self.assertEqual(explanation.plan["markdown"], None)
+        self.assertFalse(explanation.summary["comparison_available"])
+        self.assertEqual(explanation.summary["execution_calls"], 1)
+        self.assertEqual(explanation.calls[0]["attribution"], "not-observed")
+
+    def test_user_provided_plan_uses_explicit_boundary(self) -> None:
+        directory, session = self.standard_mode_session()
+        self.addCleanup(directory.cleanup)
+        explanation = explain_plan(
+            session,
+            plan_markdown="# API plan\n\n## Inspect API\nRead src/api.py.",
+            source="user-provided",
+            boundary_seq=1,
+        )
+        self.assertEqual(explanation.plan["source"], "user-provided")
+        self.assertEqual(explanation.plan["approval"], "not-observed")
+        self.assertTrue(explanation.summary["comparison_available"])
+        self.assertEqual(explanation.summary["boundary"], "explicit-seq")
+        self.assertEqual(explanation.summary["execution_calls"], 1)
+        self.assertEqual(explanation.calls[0]["phase"], "Inspect API")
+
+    def test_reconstructed_plan_is_labelled(self) -> None:
+        directory, session = self.standard_mode_session()
+        self.addCleanup(directory.cleanup)
+        explanation = session.explain_plan(
+            plan_markdown="# Reconstructed work\n\n## Read API\nInspect src/api.py.",
+            source="reconstructed",
+            boundary="first-user-message",
+        )
+        self.assertEqual(explanation.summary["plan_source"], "reconstructed")
+        self.assertEqual(explanation.summary["approval"], "not-observed")
+        self.assertEqual(explanation.summary["boundary_seq"], 1)
 
 
 if __name__ == "__main__":

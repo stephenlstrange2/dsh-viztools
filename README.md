@@ -133,18 +133,25 @@ Or start from the reusable [example notebook](examples/explain-session.py). Set 
 
 The counts in the screenshot are a point-in-time snapshot of an active session. Rerunning the notebook's loading cell reads the current trajectory and recomputes every table and summary.
 
-## Explain an approved plan
+## Explain a plan—or a Standard-mode execution
 
-`explain-plan` reads the exact Markdown submitted through `exit_plan_mode` and compares it with durable tool activity recorded afterward. It understands both ordinary `tool/call` events and nested PTC dispatches, and splits MCP names such as `mcp__context7__search` into server `context7` and operation `search`.
+`explain-plan` prefers the exact Markdown submitted through `exit_plan_mode`, but it no longer fails when a Standard-mode session has no durable plan. It always returns the native/MCP execution inventory; comparison fields become unavailable until a user-provided or explicitly reconstructed plan is supplied. It understands ordinary `tool/call` events and nested PTC dispatches, and splits names such as `mcp__context7__search` into server `context7` and operation `search`.
 
 ```python
 from dsh_viztools.session import load_session
 
 run = load_session("/path/to/session.v4.jsonl.zstd")
-plan = run.explain_plan()       # latest submitted plan
-# plan = run.explain_plan(0)    # select an earlier submission
+plan = run.explain_plan()       # submitted plan, or execution-only evidence
+# plan = run.explain_plan(0)    # select an earlier durable submission
 
-plan.plan              # exact submitted title and Markdown
+# Fallback for a Standard-mode session:
+provided = run.explain_plan(
+    plan_markdown="# Project plan\n\n## Inspect\nRead the current implementation.",
+    source="user-provided",     # or "reconstructed"
+    boundary_seq=42,             # omit to use session start
+)
+
+plan.plan              # source, approval status, boundary, and optional Markdown
 plan.phases            # headings and attribution keywords
 plan.calls             # post-submission native and PTC calls
 plan.tool_inventory    # counts and failures by tool
@@ -156,7 +163,14 @@ A useful prompt is:
 
 > Use `explain-plan` to compare the approved plan with this session's execution. Show native and MCP tools, failures, retries, phase attribution, unmapped work, and supporting evidence. Export it to HTML.
 
-A reusable [plan-explanation notebook](examples/explain-plan.py) is included.
+A reusable [plan-explanation notebook](examples/explain-plan.py) is included. Its controls let you choose a submitted plan, paste a user-provided plan, or paste a reconstructed plan and optionally set the exact execution-boundary sequence.
+
+Plan-source labels are explicit:
+
+- **Submitted DSH plan** — durable `exit_plan_mode` evidence;
+- **User-provided plan; approval not observed** — supplied text, not a recorded approval;
+- **Reconstructed plan; not an approved plan** — an interpretive fallback;
+- **No plan observed — execution evidence only** — tools, failures, retries, and timing remain reportable without comparison.
 
 Evidence labels are intentionally conservative:
 

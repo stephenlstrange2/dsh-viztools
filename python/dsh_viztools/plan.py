@@ -206,7 +206,7 @@ def _map_phase(row: dict[str, Any], phases: list[dict[str, Any]]) -> tuple[int |
 
 @dataclass(frozen=True)
 class PlanExplanation:
-    """Submitted plan plus post-submission execution evidence."""
+    """Optional plan comparison plus durable execution evidence."""
 
     plan: dict[str, Any]
     phases: list[dict[str, Any]]
@@ -231,25 +231,86 @@ class PlanExplanation:
         return pl.DataFrame(tables[table])
 
 
-def explain_plan(session: SessionData, plan_index: int = -1) -> PlanExplanation:
-    """Explain one submitted plan and all durable tool activity after submission."""
-    plans = extract_plans(session)
-    if not plans:
-        raise ValueError("session contains no valid exit_plan_mode submission")
-    try:
-        plan = plans[plan_index]
-    except IndexError as exc:
-        raise IndexError(f"plan_index {plan_index} is outside {len(plans)} submitted plan(s)") from exc
+def _title(markdown: str, fallback: str) -> str:
+    return next(
+        (match.group(2) for line in markdown.strip().splitlines() if (match := _HEADING.match(line))),
+        fallback,
+    )
 
-    phases = _sections(plan["markdown"])
-    submission_seq = plan.get("seq")
+
+def _boundary_seq(session: SessionData, boundary: str, explicit: int | None) -> int | None:
+    if explicit is not None:
+        if not isinstance(explicit, int) or explicit < 0:
+            raise ValueError("boundary_seq must be a non-negative integer")
+        return explicit
+    if boundary == "session-start":
+        return None
+    if boundary == "first-user-message":
+        return next(
+            (event.get("seq") for event in session.events if event.get("type") == "user/message" and isinstance(event.get("seq"), int)),
+            None,
+        )
+    raise ValueError("boundary must be 'session-start' or 'first-user-message'")
+
+
+def explain_plan(
+    session: SessionData,
+    plan_index: int = -1,
+    *,
+    plan_markdown: str | None = None,
+    source: str = "user-provided",
+    boundary: str = "session-start",
+    boundary_seq: int | None = None,
+) -> PlanExplanation:
+    """Explain submitted/provided plans or gracefully return execution-only evidence."""
+    plans = extract_plans(session)
+    if plan_markdown is not None:
+        if not isinstance(plan_markdown, str) or not plan_markdown.strip():
+            raise ValueError("plan_markdown must be a non-empty string")
+        if source not in {"user-provided", "reconstructed"}:
+            raise ValueError("provided plan source must be 'user-provided' or 'reconstructed'")
+        submission_seq = _boundary_seq(session, boundary, boundary_seq)
+        plan = {
+            "call_id": None,
+            "seq": submission_seq,
+            "turn": None,
+            "step": None,
+            "title": _title(plan_markdown, "Provided plan" if source == "user-provided" else "Reconstructed plan"),
+            "markdown": plan_markdown,
+            "transport": None,
+            "source": source,
+            "approval": "not-observed",
+            "boundary": "explicit-seq" if boundary_seq is not None else boundary,
+        }
+    elif plans:
+        try:
+            plan = {**plans[plan_index], "source": "submitted", "approval": "submitted", "boundary": "submission"}
+        except IndexError as exc:
+            raise IndexError(f"plan_index {plan_index} is outside {len(plans)} submitted plan(s)") from exc
+        submission_seq = plan.get("seq")
+    else:
+        plan = {
+            "call_id": None,
+            "seq": _boundary_seq(session, boundary, boundary_seq),
+            "turn": None,
+            "step": None,
+            "title": "Execution evidence only",
+            "markdown": None,
+            "transport": None,
+            "source": "not-observed",
+            "approval": "not-observed",
+            "boundary": "explicit-seq" if boundary_seq is not None else boundary,
+        }
+        submission_seq = plan["seq"]
+
+    phases = _sections(plan["markdown"]) if isinstance(plan["markdown"], str) else []
     all_calls = _tool_rows(session)
     calls: list[dict[str, Any]] = []
     for row in all_calls:
         start_seq = row.get("start_seq")
         if isinstance(submission_seq, int) and isinstance(start_seq, int) and start_seq <= submission_seq:
             continue
-        phase_index, confidence, matches = _map_phase(row, phases)
+        phase_index, confidence, matches = _map_phase(row, phases) if phases else (None, "not-observed", [])
         phase = phases[phase_index] if phase_index is not None else None
         calls.append({
             **row,
@@ -281,7 +342,12 @@ def explain_plan(session: SessionData, plan_index: int = -1) -> PlanExplanation:
     mapped = sum(row["attribution"] == "heuristic" for row in calls)
     summary = {
         "submitted_plans": len(plans),
-        "selected_plan_index": plan_index if plan_index >= 0 else len(plans) + plan_index,
+        "selected_plan_index": (plan_index if plan_index >= 0 else len(plans) + plan_index) if plan["source"] == "submitted" else None,
+        "plan_source": plan["source"],
+        "approval": plan["approval"],
+        "comparison_available": bool(phases),
+        "boundary": plan["boundary"],
+        "boundary_seq": submission_seq,
         "phases": len(phases),
         "execution_calls": len(calls),
         "native_calls": sum(row["tool_kind"] == "native" for row in calls),

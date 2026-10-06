@@ -80,12 +80,12 @@ function registerSkill(ctx: Context): void {
 
   ctx.effect(() => ctx.skills.register({
     name: 'explain-plan',
-    description: 'Compare a submitted DSH plan with execution evidence, including native and MCP tools, failures, retries, and deviations.',
-    whenToUse: 'Use after plan mode when the user wants to know which parts ran, which MCP/native tools were used, and where execution differed.',
+    description: 'Explain plan execution—or execution-only evidence—including native and MCP tools, failures, retries, and deviations.',
+    whenToUse: 'Use after plan or Standard mode when the user wants to understand MCP/native tools, execution evidence, and optional plan comparison.',
     source: 'bundled',
     provider: 'dsh-viztools',
     resourceBase: { kind: 'directory', path: resolve(PACKAGE_ROOT, 'skills', 'explain-plan') },
-    content: `# Explain a DSH plan\n\nRead the trajectory with \`dsh_viztools.session.load_session\`, then call \`run.explain_plan()\`. Show the submitted plan, its phases, native and MCP tool inventory, and the post-submission call timeline. Parse MCP names as \`mcp__<server>__<tool>\`. Label recorded call/result and sequence facts as direct evidence, plan-phase matches as heuristic, and unsupported claims as not observed. Do not call a phase skipped merely because no tool was mapped to it. Compute all counts from the returned explanation and finish with \`marimo_export_html\`.`,
+    content: `# Explain a DSH plan\n\nRead the trajectory and call \`run.explain_plan()\`. Inspect \`summary.plan_source\`: submitted is durable; user-provided means approval not observed; reconstructed is not an approved plan; not-observed means produce execution-only evidence instead of stopping. A fallback may use \`plan_markdown\`, source, and \`boundary_seq\`. Show native and MCP inventory and the execution timeline. Parse \`mcp__<server>__<tool>\`, label phase matches heuristic, and never call a phase skipped merely because no tool mapped to it. Compute counts from the result and finish with \`marimo_export_html\`.`,
   }), 'dsh-viztools.explain-plan-skill')
 }
 

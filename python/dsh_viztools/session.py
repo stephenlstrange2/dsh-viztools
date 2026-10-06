@@ -118,11 +118,26 @@ class SessionData:
             raise ValueError("table must be 'timeline' or 'tool_calls'")
         return pl.DataFrame(tables[table])
 
-    def explain_plan(self, plan_index: int = -1) -> Any:
-        """Explain one durable ``exit_plan_mode`` submission and later execution."""
+    def explain_plan(
+        self,
+        plan_index: int = -1,
+        *,
+        plan_markdown: str | None = None,
+        source: str = "user-provided",
+        boundary: str = "session-start",
+        boundary_seq: int | None = None,
+    ) -> Any:
+        """Explain a submitted/provided plan, or return execution-only evidence."""
         from .plan import explain_plan
 
-        return explain_plan(self, plan_index)
+        return explain_plan(
+            self,
+            plan_index,
+            plan_markdown=plan_markdown,
+            source=source,
+            boundary=boundary,
+            boundary_seq=boundary_seq,
+        )
 
 
 def load_session(path: str | Path) -> SessionData:
