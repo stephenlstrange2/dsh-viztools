@@ -40,6 +40,8 @@ Goal: a committed, reviewable baseline before security work starts.
 
 Exit criteria: `pnpm check` green, milestone commit ready, and all three entries load independently in a test profile. Tagging `v0.1.1` follows the milestone commit.
 
+**Milestone status: complete (2026-10-06).** `pnpm check` passes; runtime, inert gate, and inert report entries booted together in the disposable `viztools-test` profile without activation warnings. Changes are intentionally left uncommitted for review.
+
 ## Milestone 1 — Plan gate (gap A)
 
 Goal: a new session cannot run non-planning tools until the user approves a plan.
