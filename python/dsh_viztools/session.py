@@ -113,10 +113,16 @@ class SessionData:
             import polars as pl
         except ImportError as exc:
             raise RuntimeError("Install polars in the notebook environment to use to_polars()") from exc
-        rows = self.timeline if table == "timeline" else self.tool_calls
-        if table not in {"timeline", "tool_calls"}:
+        tables = {"timeline": self.timeline, "tool_calls": self.tool_calls}
+        if table not in tables:
             raise ValueError("table must be 'timeline' or 'tool_calls'")
-        return pl.DataFrame(rows)
+        return pl.DataFrame(tables[table])
+
+    def explain_plan(self, plan_index: int = -1) -> Any:
+        """Explain one durable ``exit_plan_mode`` submission and later execution."""
+        from .plan import explain_plan
+
+        return explain_plan(self, plan_index)
 
 
 def load_session(path: str | Path) -> SessionData:

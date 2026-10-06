@@ -13,7 +13,7 @@ The first version also includes a read-only Python loader for DSH `session.vN.js
 - Connects marimo through DSH's official `@deepseek-ai/dsh-mcp-client` bridge.
 - Uses marimo's experimental hidden `--mcp=code-mode` mode so the agent can edit the notebook, not just inspect it.
 - Returns the authenticated browser URL through `marimo_status`; paste/open it in DSH's existing right-sidebar Browser plugin.
-- Registers `marimo_status`, `marimo_export_html`, and the `explain-with-notebook` skill.
+- Registers `marimo_status`, `marimo_export_html`, and the `explain-with-notebook` and `explain-plan` skills.
 - Adds `dsh_viztools.session.load_session()` to the notebook's Python path.
 
 ## Requirements
@@ -133,6 +133,39 @@ Or start from the reusable [example notebook](examples/explain-session.py). Set 
 
 The counts in the screenshot are a point-in-time snapshot of an active session. Rerunning the notebook's loading cell reads the current trajectory and recomputes every table and summary.
 
+## Explain an approved plan
+
+`explain-plan` reads the exact Markdown submitted through `exit_plan_mode` and compares it with durable tool activity recorded afterward. It understands both ordinary `tool/call` events and nested PTC dispatches, and splits MCP names such as `mcp__context7__search` into server `context7` and operation `search`.
+
+```python
+from dsh_viztools.session import load_session
+
+run = load_session("/path/to/session.v4.jsonl.zstd")
+plan = run.explain_plan()       # latest submitted plan
+# plan = run.explain_plan(0)    # select an earlier submission
+
+plan.plan              # exact submitted title and Markdown
+plan.phases            # headings and attribution keywords
+plan.calls             # post-submission native and PTC calls
+plan.tool_inventory    # counts and failures by tool
+plan.mcp_inventory     # counts by MCP server and operation
+plan.summary           # computed plan/execution totals
+```
+
+A useful prompt is:
+
+> Use `explain-plan` to compare the approved plan with this session's execution. Show native and MCP tools, failures, retries, phase attribution, unmapped work, and supporting evidence. Export it to HTML.
+
+A reusable [plan-explanation notebook](examples/explain-plan.py) is included.
+
+Evidence labels are intentionally conservative:
+
+- **direct** means the trajectory records the call, result, order, or timing;
+- **heuristic** means a call was associated with a plan phase by keyword overlap;
+- **not observed** means there is not enough durable evidence for that attribution.
+
+An unmapped call may be unplanned work or simply lack matching prose. Likewise, a phase with no mapped call is not automatically skipped: discussion and analysis can happen without a tool call.
+
 ## Security model
 
 A marimo code-mode notebook executes arbitrary Python with the same operating-system authority as the DSH process. Treat it as shell-equivalent.
@@ -155,6 +188,7 @@ Do not install editable mode in a locked production/OTX console. A later read-on
 - Environment installation happens during plugin activation and requires network access on the first run.
 - This MVP manages one notebook/server per plugin instance (normally one per workspace process).
 - The trajectory loader normalizes core message/tool/token fields defensively; plugin-defined events remain available in `run.events` but may not receive specialized columns.
+- Plan-phase attribution is intentionally heuristic. DSH durably records the submitted plan and tool activity, but it does not record an authoritative plan-step identifier on each later call.
 - Automatic sidebar opening is deferred: DSH 0.2 does not currently expose a secret-bearing Host-to-Client configuration seam suitable for the random token. The agent returns the URL instead.
 - Sidebar viewing depends on DSH's Browser plugin and therefore on iframe/WebSocket compatibility in the installed DSH build.
 - `polars` is not installed by default; use Python lists, marimo tables, or install it in the notebook environment.

@@ -77,6 +77,16 @@ function registerSkill(ctx: Context): void {
     resourceBase: { kind: 'directory', path: resolve(PACKAGE_ROOT, 'skills', 'explain-with-notebook') },
     content: `# Explain with marimo\n\nUse the live marimo code-mode MCP tools to inspect and edit the managed notebook.\n\n1. Read the source facts before editing. For a DSH trajectory, import \`dsh_viztools.session.load_session\`.\n2. Add small reactive cells: source/loading, transformations, then a flow, table, chart, or timeline.\n3. Put a short plain-language \`mo.md\` explanation next to every important result.\n4. Keep every reported number computed from source data; do not hand-copy totals.\n5. Run or inspect affected cells and fix errors.\n6. Call \`marimo_export_html\` at the end and link both the notebook source and HTML export in your reply.\n\nThe notebook executes Python with workspace-level authority. Treat code changes as shell-equivalent and stay inside the workspace.`,
   }), 'dsh-viztools.skill')
+
+  ctx.effect(() => ctx.skills.register({
+    name: 'explain-plan',
+    description: 'Compare a submitted DSH plan with execution evidence, including native and MCP tools, failures, retries, and deviations.',
+    whenToUse: 'Use after plan mode when the user wants to know which parts ran, which MCP/native tools were used, and where execution differed.',
+    source: 'bundled',
+    provider: 'dsh-viztools',
+    resourceBase: { kind: 'directory', path: resolve(PACKAGE_ROOT, 'skills', 'explain-plan') },
+    content: `# Explain a DSH plan\n\nRead the trajectory with \`dsh_viztools.session.load_session\`, then call \`run.explain_plan()\`. Show the submitted plan, its phases, native and MCP tool inventory, and the post-submission call timeline. Parse MCP names as \`mcp__<server>__<tool>\`. Label recorded call/result and sequence facts as direct evidence, plan-phase matches as heuristic, and unsupported claims as not observed. Do not call a phase skipped merely because no tool was mapped to it. Compute all counts from the returned explanation and finish with \`marimo_export_html\`.`,
+  }), 'dsh-viztools.explain-plan-skill')
 }
 
 /** Start one workspace-local marimo server and bridge its MCP tools into DSH. */
