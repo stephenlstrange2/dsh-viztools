@@ -39,6 +39,15 @@ Run tests and confirm failures are fixed.
         path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
         return directory, load_session(path)
 
+    def test_ptc_dispatch_error_shape_is_top_level(self) -> None:
+        directory, session = self.fixture()
+        self.addCleanup(directory.cleanup)
+        explanation = explain_plan(session)
+        ptc = next(call for call in explanation.calls if call["call_id"] == "test-1")
+        self.assertTrue(ptc["is_error"])
+        self.assertEqual(ptc["error_code"], "EXIT_1")
+        self.assertEqual(ptc["duration_ms"], 300)
+
     def test_classifies_mcp_names(self) -> None:
         self.assertEqual(classify_tool("read")["kind"], "native")
         self.assertEqual(classify_tool("mcp__context7__search"), {

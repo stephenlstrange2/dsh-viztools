@@ -12,7 +12,7 @@ export type { Config as DshViztoolsConfig, ResolvedConfig } from './config.js'
 export { MarimoRuntime, workspacePath } from './runtime.js'
 export type { RuntimeStatus } from './runtime.js'
 
-export const name = 'dsh-viztools'
+export const name = 'dsh-viztools-runtime'
 export const inject = ['tools', 'skills']
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')

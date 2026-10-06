@@ -195,9 +195,17 @@ def load_session(path: str | Path) -> SessionData:
             tool_calls.append(call)
         elif event_type == "tool/result":
             message = data.get("message") if isinstance(data.get("message"), dict) else {}
-            call_id = message.get("toolCallId", message.get("callId"))
-            call_id = call_id if isinstance(call_id, str) else None
-            is_error = bool(message.get("isError", False))
+            # DSH 0.2 usually keeps the id and error flag on the tool-result content block
+            # (and the id on message.source); older records keep them on the message.
+            blocks = [b for b in message.get("content", []) if isinstance(b, dict) and b.get("type") == "tool-result"] \
+                if isinstance(message.get("content"), list) else []
+            source = message.get("source") if isinstance(message.get("source"), dict) else {}
+            call_id = next((c for c in (
+                message.get("toolCallId"), message.get("callId"), source.get("callId"),
+                *(b.get("toolCallId") for b in blocks),
+            ) if isinstance(c, str)), None)
+            is_error = bool(message.get("isError", False)) or any(b.get("isError") is True for b in blocks) \
+                or isinstance(data.get("error"), dict)
             call = calls.get(call_id or "")
             if call is not None:
                 call["end_seq"] = event.get("seq")

@@ -31,6 +31,25 @@ class SessionLoaderTest(unittest.TestCase):
         self.assertEqual(session.tool_calls[0]["duration_ms"], 250)
         self.assertEqual(session.timeline[0]["summary"], "hello")
 
+    def test_result_id_and_error_on_content_block(self) -> None:
+        # The shape DSH 0.2 writes: id on message.source and the tool-result block, isError on the block.
+        records = [
+            {"version": 4},
+            {"type": "tool/call", "seq": 1, "time": 2_000, "data": {"turn": 1, "step": 1, "callId": "c1", "name": "mcp__otx__diff", "arguments": "{}"}},
+            {"type": "tool/result", "seq": 2, "time": 2_400, "data": {"turn": 1, "step": 1, "message": {"id": "m", "role": "tool", "source": {"kind": "tool", "callId": "c1"}, "content": [{"type": "tool-result", "toolCallId": "c1", "isError": False, "content": []}]}}},
+            {"type": "tool/call", "seq": 3, "time": 3_000, "data": {"turn": 1, "step": 2, "callId": "c2", "name": "read", "arguments": "{}"}},
+            {"type": "tool/result", "seq": 4, "time": 3_100, "data": {"turn": 1, "step": 2, "error": {"name": "FsError", "code": "FS_NOT_FOUND"}, "message": {"source": {"kind": "tool", "callId": "c2"}, "content": [{"type": "tool-result", "toolCallId": "c2", "isError": True, "content": []}]}}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "session.v4.jsonl")
+            path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
+            session = load_session(path)
+
+        first, second = session.tool_calls
+        self.assertEqual((first["duration_ms"], first["is_error"]), (400, False))
+        self.assertEqual((second["duration_ms"], second["is_error"], second["error_code"]), (100, True, "FS_NOT_FOUND"))
+        self.assertEqual(session.summary["failed_tool_calls"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

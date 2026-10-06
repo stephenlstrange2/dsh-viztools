@@ -207,6 +207,10 @@ Do not install editable mode in a locked production/OTX console. A later read-on
 - Sidebar viewing depends on DSH's Browser plugin and therefore on iframe/WebSocket compatibility in the installed DSH build.
 - `polars` is not installed by default; use Python lists, marimo tables, or install it in the notebook environment.
 
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the plan to support locked internal consoles: plan gate, secure sidebar, approved run rules, automatic reports, read-only mode, and offline uv installs. Version support and exact DSH peer-pin policy are documented in [COMPATIBILITY.md](COMPATIBILITY.md).
+
 ## Development
 
 ```bash

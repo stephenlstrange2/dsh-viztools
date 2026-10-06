@@ -10,6 +10,18 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./runtime": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./gate": {
+      "types": "./lib/gate.d.ts",
+      "default": "./lib/gate.js"
+    },
+    "./report": {
+      "types": "./lib/report.d.ts",
+      "default": "./lib/report.js"
+    },
     "./client": {
       "types": "./lib/client.d.ts",
       "default": "./lib/client.js"
@@ -25,6 +37,8 @@
     "examples",
     "docs/assets",
     "README.md",
+    "ROADMAP.md",
+    "COMPATIBILITY.md",
     "LICENSE"
   ],
   "license": "MIT",
