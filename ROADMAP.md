@@ -78,15 +78,17 @@ Exit criteria: in an OTX test profile, `propose_sequence`, `emit_otx`, `replay_t
 
 Goal: marimo opens automatically and its token never enters the session log.
 
-- [ ] Add a Host-side authenticated Remote or exact Fetch route that returns the current marimo URL to the operator client only.
-- [ ] Client half calls `ctx.sidebarRight.openTab('browser', { params: { url } })` when a session is mounted and when a plan review appears.
-- [ ] Avoid persisting the token in sidebar layout: resolve a fresh URL at open time, or serve marimo through a DSH-authenticated proxy path.
-- [ ] Remove `browserUrl` from the model-facing `marimo_status` result. Keep the notebook path and readiness only.
-- [ ] Make `autoOpen` functional (it is currently reserved).
+- [x] Add an authenticated exact Fetch route that returns the current marimo URL to the operator client only, with `Cache-Control: no-store`.
+- [x] Client half calls `ctx.sidebarRight.openTab('browser', { params: { url } })` when a session is mounted and after a connection reset.
+- [x] Resolve the current URL at open time rather than injecting it into Client configuration or model context.
+- [x] Remove `browserUrl` from the model-facing `marimo_status` result. Keep notebook path, port, and readiness metadata only.
+- [x] Make automatic opening functional through the package Client entry.
 
-Tests: token absent from trajectory after a full session; reopening after DSH restart gets a new token; client without authentication cannot fetch the URL.
+Tests cover strict Client payload parsing and source-level separation of the model tool from the secret Host route. Disposable-profile smoke tests confirmed the authenticated route returns the URL, an unauthenticated request receives HTTP 401, and the current workspace's stored session files contain no `access_token=` string.
 
 Exit criteria: grep of the session log for the access token returns nothing; the notebook opens with no user action.
+
+**Milestone status: implementation complete (2026-10-06).** The runtime and Client bundle boot without activation warnings, and authenticated/unauthenticated route behavior is verified. Manual visual confirmation of tab opening remains part of the browser acceptance pass because the headless fixture has no pre-existing mounted Session; the landing-page screenshot was removed because it demonstrated no milestone behavior.
 
 ## Milestone 3 — Run rules from the approved plan (gap C)
 

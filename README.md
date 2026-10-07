@@ -12,7 +12,7 @@ The first version also includes a read-only Python loader for DSH `session.vN.js
 - Stops the child process when the Cordis plugin scope is disposed.
 - Connects marimo through DSH's official `@deepseek-ai/dsh-mcp-client` bridge.
 - Uses marimo's experimental hidden `--mcp=code-mode` mode so the agent can edit the notebook, not just inspect it.
-- Returns the authenticated browser URL through `marimo_status`; paste/open it in DSH's existing right-sidebar Browser plugin.
+- Sends the authenticated browser URL only through DSH's authenticated Host-to-Client route and opens the right-sidebar Browser automatically; the token never enters a model tool result.
 - Registers `marimo_status`, `marimo_export_html`, and the `explain-with-notebook` and `explain-plan` skills.
 - Adds `dsh_viztools.session.load_session()` to the notebook's Python path.
 
@@ -46,7 +46,7 @@ dsh plugin --profile rescue add dsh-viztools
 dsh rescue
 ```
 
-On first boot, environment setup can take a minute. Ask the agent to call `marimo_status`, then open its loopback URL in the right-sidebar Browser.
+On first boot, environment setup can take a minute. Once a Session is mounted, the live notebook opens automatically in the right-sidebar Browser. `marimo_status` reports readiness and the notebook path without exposing the authentication token.
 
 ## Configuration
 
@@ -81,7 +81,7 @@ Override it in the profile's `cordis.patch.yml`:
 | `pythonVersion` | `3.12` | Python version uv provisions. |
 | `marimoVersion` | `0.25.1` | Exact marimo version installed. |
 | `mcpCodeMode` | `true` | Enable marimo's experimental code-editing MCP tools. |
-| `autoOpen` | `true` | Reserved for a future secret-safe automatic-open bridge; ignored in this MVP. |
+| `autoOpen` | `true` | Open marimo automatically for each mounted Session through the authenticated Client route. |
 | `exportPath` | `.dsh/notebooks/explanation.html` | Default static export destination. |
 | `startupTimeoutMs` | `180000` | Setup and readiness timeout. |
 
@@ -104,6 +104,11 @@ The enforcement entry is separate from the marimo runtime. Add it to a profile t
 New and unapproved resumed sessions enter plan mode. Before a positive `exit_plan_mode` review, only the configured planning tools and `exit_plan_mode` may execute; every refusal is recorded durably. Approval survives resume, and forks inherit the gate state at their fork point. The entry fails agent activation if a configured planning tool is unavailable.
 
 The gate enforces both native calls and nested PTC dispatches. Plan mode alone is not treated as authorization, so `/plan off`, a dismissed review, or **Keep planning** does not open it.
+
+### Secure automatic sidebar
+
+When a Session appears on screen, the Client plugin requests the marimo URL from `/api/viztools/sidebar-url` and opens it with DSH's existing Browser tab. The route is protected by DSH's Host/Origin and browser-session authentication, sends `Cache-Control: no-store`, and rejects unauthenticated requests. The model-facing `marimo_status` tool returns only the notebook path, loopback port, and marimo version.
+
 
 ## Explain a DSH session
 
@@ -206,7 +211,7 @@ This MVP reduces accidental exposure but is **not a sandbox**:
 
 - marimo binds only to `127.0.0.1`;
 - every activation gets a random token;
-- `marimo_status` returns the tokenized loopback URL to the model so it can hand the link to the user; treat the URL as a short-lived local secret;
+- the tokenized URL is returned only by an authenticated, no-store Host route to the Client plugin and is never included in `marimo_status`;
 - DSH's Browser layout may retain that URL locally, but its random token becomes useless when this plugin process stops;
 - managed paths stay in the workspace;
 - model tool calls still traverse DSH's normal tool policy and approval pipeline;
@@ -221,13 +226,12 @@ Do not install editable mode in a locked production/OTX console. A later read-on
 - This MVP manages one notebook/server per plugin instance (normally one per workspace process).
 - The trajectory loader normalizes core message/tool/token fields defensively; plugin-defined events remain available in `run.events` but may not receive specialized columns.
 - Plan-phase attribution is intentionally heuristic. DSH durably records the submitted plan and tool activity, but it does not record an authoritative plan-step identifier on each later call.
-- Automatic sidebar opening is deferred: DSH 0.2 does not currently expose a secret-bearing Host-to-Client configuration seam suitable for the random token. The agent returns the URL instead.
 - Sidebar viewing depends on DSH's Browser plugin and therefore on iframe/WebSocket compatibility in the installed DSH build.
 - `polars` is not installed by default; use Python lists, marimo tables, or install it in the notebook environment.
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the plan to support locked internal consoles: plan gate, secure sidebar, approved run rules, automatic reports, read-only mode, and offline uv installs. Version support and exact DSH peer-pin policy are documented in [COMPATIBILITY.md](COMPATIBILITY.md).
+See [ROADMAP.md](ROADMAP.md) for the plan to support locked internal consoles: plan gate, secure sidebar, approved run rules, automatic reports, read-only mode, and offline uv installs. Version support and exact DSH peer-pin policy are documented in [COMPATIBILITY.md](COMPATIBILITY.md). Completed milestone results and screenshots are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## Development
 

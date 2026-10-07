@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import type { SkillRegistry } from '@deepseek-ai/dsh-skill'
 import { apply as connectMcp } from '@deepseek-ai/dsh-mcp-client'
 import { defineTool } from '@deepseek-ai/dsh-tools'
@@ -13,7 +14,7 @@ export { MarimoRuntime, workspacePath } from './runtime.js'
 export type { RuntimeStatus } from './runtime.js'
 
 export const name = 'dsh-viztools-runtime'
-export const inject = ['tools', 'skills']
+export const inject = ['tools', 'skills', 'connection']
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -27,19 +28,17 @@ function registerTools(ctx: Context, runtime: MarimoRuntime): void {
         type: 'object',
         properties: {
           notebook: { type: 'string', required: true },
-          browserUrl: { type: 'string', required: true },
           port: { type: 'integer', required: true },
           marimoVersion: { type: 'string', required: true },
         },
         additionalProperties: false,
       },
-      render: (_args, value) => [{ type: 'text', text: `Live notebook: ${value.notebook}\nOpen in the DSH Browser sidebar: ${value.browserUrl}` }],
+      render: (_args, value) => [{ type: 'text', text: `Live notebook: ${value.notebook} (marimo ${value.marimoVersion} on loopback port ${value.port})` }],
     },
     async execute() {
       const status = runtime.status()
       return {
         notebook: status.notebook,
-        browserUrl: status.browserUrl,
         port: status.port,
         marimoVersion: status.marimoVersion,
       }
@@ -94,6 +93,16 @@ export async function apply(ctx: Context, config: ResolvedConfig): Promise<void>
   const runtime = new MarimoRuntime({ ...config, cwd: config.cwd || process.cwd() })
   const status = await runtime.start()
   ctx.effect(() => () => runtime.stop(), 'dsh-viztools.marimo-runtime')
+  ctx.effect(() => ctx.connection.fetch.register({
+    path: '/api/viztools/sidebar-url',
+    methods: ['GET'],
+    requestBody: 'buffered',
+    fetch: async () => Response.json({
+      browserUrl: runtime.status().browserUrl,
+      notebook: runtime.status().notebook,
+      marimoVersion: runtime.status().marimoVersion,
+    }, { headers: { 'cache-control': 'no-store' } }),
+  }), 'dsh-viztools.sidebar-url')
 
   registerTools(ctx, runtime)
   registerSkill(ctx)
