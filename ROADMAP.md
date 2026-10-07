@@ -148,19 +148,21 @@ Goal: the plugin builds and exports the report at the end of a run without the a
 
 Work:
 
-- [ ] Resolve the current session's trajectory path through a host service, never by guessing the directory layout.
-- [ ] One notebook and export per session: `.dsh/reports/<session-id>/report.py` and `report.html`, replacing the shared `explanation.py`.
-- [ ] Trigger after a configured terminal tool result, or at turn end (`agent/turn-stopping`, as `dsh-inline-figures` does).
-- [ ] Make generation idempotent on `(session id, trigger seq, template version)`.
-- [ ] Let profiles supply their own template; pass inputs as structured data (trajectory, plan, rules, refusals, extra files), not generated code.
-- [ ] Export without code using marimo's no-code HTML option for the pinned version.
-- [ ] Record a `report/available` event and present the file as a deliverable; the agent adds a short summary.
-- [ ] Do not depend on `tool-skill`; skills remain a developer convenience.
-- [ ] Ship a default template based on `examples/explain-plan.py`.
+- [x] Resolve the current session's trajectory path through the JSONL persistence backend after a durability flush, never by guessing its directory layout.
+- [x] One notebook and export per session: `.dsh/reports/<session-id>/report.py`, `inputs.json`, and `report.html`.
+- [x] Trigger after a configured terminal tool result or at `agent/turn-stopping`.
+- [x] Make generation idempotent on `(session id, trigger seq, template version)` and deduplicate in-flight generation.
+- [x] Let profiles supply a trusted template; pass trajectory, trigger, session identity, and extra artifact paths through structured JSON rather than generated code.
+- [x] Export without code using marimo `--no-include-code --force` for the pinned version.
+- [x] Record durable `available` or `failed` outcomes with artifact paths/reason. Transcript deliverable presentation remains a Client/report-card follow-up; the files and durable event are available now.
+- [x] Do not depend on `tool-skill`; report generation is entirely plugin-owned.
+- [x] Ship a default template using the session, plan, tool, and approved-run-rule loaders.
 
-Tests: trigger fires once across restart, missing extra input is reported not fatal, template error produces a visible failed report record.
+Tests cover stable idempotency keys, settled available/failed outcomes across replay, template-version regeneration, and durable failure evidence. A real compressed session exported successfully to a 69 KB code-free HTML report, and source-import text was absent from the artifact.
 
 Exit criteria: finishing an OTX run produces a code-free HTML report linked in the final turn with no agent tool calls involved.
+
+**Milestone status: implementation complete (2026-10-06).** Plugin-owned generation, per-session artifacts, trusted templates, structured inputs, both trigger paths, no-code export, and durable success/failure evidence are implemented and verified. The automatic final-turn deliverable card is deferred to the internal UI integration because this package currently records the report artifact rather than registering a custom transcript presenter. The attempted `file://` screenshot rendered blank in headless Chromium, so it was removed as non-evidence.
 
 ## Milestone 5 — Locked-console mode
 

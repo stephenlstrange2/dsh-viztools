@@ -31,7 +31,10 @@ describe('independent Cordis entries', () => {
 
   it('loads the reserved report entry inertly', () => {
     const { ctx, warnings } = mockContext()
-    report.apply(ctx as never, { enabled: false })
+    report.apply(ctx as never, {
+      enabled: false, cwd: '', triggerTools: [], triggerOnTurnStop: false, template: '', templateVersion: '1',
+      outputDir: '.dsh/reports', includeCode: false, environmentDir: '.dsh/marimo', extraInputs: {},
+    })
     expect(report.name).toBe('dsh-viztools-report')
     expect(warnings).toEqual([])
   })

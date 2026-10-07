@@ -4,6 +4,21 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Milestone 4 — Plugin-owned automatic reports
+
+- Added configurable terminal-tool and turn-stop report triggers.
+- Added per-session notebook, structured input, and HTML paths under `.dsh/reports/<session-id>/`.
+- Resolve and flush the exact trajectory through session persistence instead of guessing storage layout.
+- Added trusted profile templates and structured extra artifact paths.
+- Added default code-free export using marimo `--no-include-code --force`.
+- Added idempotency across resume based on session, trigger sequence, and template version, plus in-flight deduplication.
+- Added durable `available` and `failed` report events.
+- Shipped a default report template covering session metrics, tools, plan evidence, and run rules.
+
+Verification: a real compressed DSH session produced a 69 KB HTML report; notebook source imports were absent from the code-free artifact. Unit tests cover successful/failed settlement and template-version idempotency.
+
+Known limitation: durable report artifacts are recorded, but a custom final-turn deliverable card remains an internal Client integration follow-up. A headless `file://` screenshot was blank and was removed rather than presenting non-evidence.
+
 ### Milestone 3 — Approved narrowing run rules
 
 - Added a typed `propose_run_rules` tool with explicit human approval.

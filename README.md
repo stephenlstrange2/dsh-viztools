@@ -127,6 +127,31 @@ The agent calls `propose_run_rules` with structured `allow`, `deny`, `limits`, a
 
 `explain_plan()` exposes a `rules` table showing enforced rules, observed calls, refused calls, and advisory notes.
 
+### Automatic reports
+
+Enable the separate report entry to generate a trusted, per-session report without an agent skill or notebook-editing tool:
+
+```yaml
+- id: dsh-viztools-report
+  name: dsh-viztools/report
+  config:
+    enabled: true
+    triggerTools: [finalize_run, abandon_run]
+    triggerOnTurnStop: false
+    template: ./templates/otx-report.py  # omit for the bundled template
+    templateVersion: otx-v1
+    outputDir: .dsh/reports
+    environmentDir: .dsh/marimo
+    includeCode: false
+    extraInputs:
+      auditLog: runs/current/audit.jsonl
+      manifest: runs/current/manifest.json
+```
+
+Before generation the plugin flushes session persistence and asks the JSONL backend for the exact current trajectory path. It writes `.dsh/reports/<session-id>/report.py`, `inputs.json`, and `report.html`; profile-supplied templates receive only structured inputs and trusted workspace paths. `--no-include-code` produces a code-free export by default.
+
+Generation is idempotent on session, trigger sequence, and template version. Both successful and failed attempts become durable `viztools-report/change` events, so resume does not duplicate an already settled report. The bundled template summarizes session metrics, tool calls, plan evidence, and approved run rules.
+
 ### Secure automatic sidebar
 
 When a Session appears on screen, the Client plugin requests the marimo URL from `/api/viztools/sidebar-url` and opens it with DSH's existing Browser tab. The route is protected by DSH's Host/Origin and browser-session authentication, sends `Cache-Control: no-store`, and rejects unauthenticated requests. The model-facing `marimo_status` tool returns only the notebook path, loopback port, and marimo version.
