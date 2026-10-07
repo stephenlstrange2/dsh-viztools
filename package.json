@@ -22,6 +22,10 @@
       "types": "./lib/report.d.ts",
       "default": "./lib/report.js"
     },
+    "./profile-check": {
+      "types": "./lib/profile-check.d.ts",
+      "default": "./lib/profile-check.js"
+    },
     "./client": {
       "types": "./lib/client.d.ts",
       "default": "./lib/client.js"
@@ -40,6 +44,7 @@
     "ROADMAP.md",
     "COMPATIBILITY.md",
     "CHANGELOG.md",
+    "THREAT_MODEL.md",
     "LICENSE"
   ],
   "license": "MIT",

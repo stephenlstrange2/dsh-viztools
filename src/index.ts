@@ -90,6 +90,9 @@ function registerSkill(ctx: Context): void {
 
 /** Start one workspace-local marimo server and bridge its MCP tools into DSH. */
 export async function apply(ctx: Context, config: ResolvedConfig): Promise<void> {
+  if (config.mode === 'managed-readonly' && config.mcpCodeMode) {
+    ctx.logger.info('managed-readonly mode forces mcpCodeMode off')
+  }
   const runtime = new MarimoRuntime({ ...config, cwd: config.cwd || process.cwd() })
   const status = await runtime.start()
   ctx.effect(() => () => runtime.stop(), 'dsh-viztools.marimo-runtime')
@@ -104,10 +107,12 @@ export async function apply(ctx: Context, config: ResolvedConfig): Promise<void>
     }, { headers: { 'cache-control': 'no-store' } }),
   }), 'dsh-viztools.sidebar-url')
 
-  registerTools(ctx, runtime)
-  registerSkill(ctx)
+  if (config.mode === 'editable') {
+    registerTools(ctx, runtime)
+    registerSkill(ctx)
+  }
 
-  if (status.mcpUrl !== undefined) {
+  if (config.mode === 'editable' && status.mcpUrl !== undefined) {
     await connectMcp(ctx, {
       transport: 'streamable-http',
       serverName: 'marimo',

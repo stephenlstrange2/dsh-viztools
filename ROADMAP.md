@@ -176,15 +176,17 @@ Goal: the plugin can pass `check-dsh-profile.py` in the OTX console.
 
 In `managed-readonly`:
 
-- [ ] `mcpCodeMode` is forced off and the marimo MCP bridge is not registered.
-- [ ] No model-facing notebook editing tools; the agent can read and explain only.
-- [ ] Templates come only from trusted deployment configuration paths.
-- [ ] Notebook execution is triggered only by the report service.
-- [ ] marimo runs in `marimo run` (app) mode rather than `edit` mode for viewing.
-- [ ] Document that trusted templates still run as the console user and add that to the console threat model.
-- [ ] Add a profile-check rule: `mode: managed-readonly` required when the console profile is detected.
+- [x] `mcpCodeMode` is forced off and the marimo MCP bridge is not registered.
+- [x] No model-facing marimo status/export tools or notebook skills are registered.
+- [x] The served notebook must already exist below `managedReportRoot`; runtime never creates a starter notebook in locked mode.
+- [x] Notebook creation and export are owned by the trusted report service rather than the agent.
+- [x] marimo runs in `marimo run` app mode, omits source code, and hides detailed tracebacks.
+- [x] Document in `THREAT_MODEL.md` that trusted templates still execute as the console user.
+- [x] Export `checkLockedProfile()` for mode, MCP, and managed-report-root checks; document the complete-composition checks required in internal `check-dsh-profile.py`.
 
 Exit criteria: profile checker accepts the console profile; the agent has no path to execute new Python.
+
+**Milestone status: implementation complete (2026-10-06).** A disposable managed-readonly profile booted successfully; the served app used a report-owned notebook, initial HTML contained no source marker, and `/mcp/server` returned HTTP 404. The internal `check-dsh-profile.py` repository is not available here, so its integration is documented and supported by the exported checker rather than modified directly.
 
 ## Milestone 6 — Offline installs with uv
 

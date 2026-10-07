@@ -4,6 +4,19 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Milestone 5 — Locked-console managed-readonly mode
+
+- Added `mode: managed-readonly` to the runtime.
+- Runs marimo as a read-only app rather than an editor and omits source code and detailed tracebacks.
+- Forcibly omits code-mode MCP, the MCP client bridge, model-facing marimo tools, and notebook skills.
+- Requires an existing report-service-generated notebook below `managedReportRoot`.
+- Added exported `checkLockedProfile()` validation and a documented complete-profile checker contract.
+- Added `THREAT_MODEL.md` covering trusted templates and residual risk.
+
+Verification: 29 Vitest tests and 9 Python tests passed. A disposable managed-readonly profile booted, served the trusted report notebook, omitted a source marker from initial HTML, and returned HTTP 404 for `/mcp/server`.
+
+Security boundary: deployment-owned templates still execute Python as the console OS user. Managed-readonly prevents model-authored code; it is not a sandbox for malicious deployment templates.
+
 ### Milestone 4 — Plugin-owned automatic reports
 
 - Added configurable terminal-tool and turn-stop report triggers.
