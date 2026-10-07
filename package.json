@@ -113,6 +113,7 @@
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit",
     "test:client-bundle": "node scripts/test-client-bundle.mjs",
+    "wheelhouse": "node scripts/build-wheelhouse.mjs",
     "test": "vitest run && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python python3 -m unittest discover -s test -p 'test_*.py'",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm test:client-bundle"
   },

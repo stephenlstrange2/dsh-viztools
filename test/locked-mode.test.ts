@@ -5,6 +5,7 @@ import { checkLockedProfile } from '../src/profile-check.js'
 const base = {
   mode: 'managed-readonly' as const,
   cwd: '', notebook: '.dsh/reports/current/report.py', managedReportRoot: '.dsh/reports', environmentDir: '.dsh/marimo', uvCommand: 'uv',
+  uv: { command: 'uv', minVersion: '0.11.0', offline: false, indexUrl: '', findLinks: '', cacheDir: '', pythonInstallDir: '', requirements: 'python/requirements.lock', requireHashes: true },
   pythonVersion: '3.12', marimoVersion: '0.25.1', mcpCodeMode: false, autoOpen: true,
   exportPath: '.dsh/reports/current/report.html', startupTimeoutMs: 180_000,
 }

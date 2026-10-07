@@ -5,6 +5,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'no
 import { fileURLToPath } from 'node:url'
 import { spawn, type ChildProcess } from 'node:child_process'
 import type { ResolvedConfig } from './config.js'
+import { probeUv } from './uv.js'
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const NOTEBOOK_TEMPLATE = `import marimo\n\n__generated_with = "0.25.1"\napp = marimo.App(width="medium")\n\n\n@app.cell\ndef _():\n    import marimo as mo\n    return (mo,)\n\n\n@app.cell\ndef _(mo):\n    mo.md("""# DSH explanation\n\nThis live notebook is managed by **dsh-viztools**. Ask the agent to explain a run or add a visualization.\n""")\n    return\n\n\nif __name__ == "__main__":\n    app.run()\n`
@@ -121,20 +122,33 @@ export class MarimoRuntime {
       : join(this.environmentDir, '.venv', 'bin', 'python')
   }
 
+  private uvEnvironment(): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {}
+    if (this.config.uv.cacheDir !== '') env.UV_CACHE_DIR = workspacePath(this.cwd, this.config.uv.cacheDir, 'uv.cacheDir')
+    if (this.config.uv.pythonInstallDir !== '') env.UV_PYTHON_INSTALL_DIR = workspacePath(this.cwd, this.config.uv.pythonInstallDir, 'uv.pythonInstallDir')
+    if (this.config.uv.offline) env.UV_OFFLINE = '1'
+    return env
+  }
+
   private async prepareEnvironment(): Promise<void> {
     await mkdir(this.environmentDir, { recursive: true })
+    const uvCommand = this.config.uv.command || this.config.uvCommand
+    const uvEnv = this.uvEnvironment()
+    await probeUv(uvCommand, this.config.uv.minVersion, uvEnv)
     const marker = join(this.environmentDir, 'runtime.json')
-    const wanted = JSON.stringify({ marimo: this.config.marimoVersion, python: this.config.pythonVersion, loader: 1 })
+    const wanted = JSON.stringify({ marimo: this.config.marimoVersion, python: this.config.pythonVersion, loader: 2, uv: this.config.uv })
     let installed = ''
     try { installed = await readFile(marker, 'utf8') } catch { /* first run */ }
     if (installed === wanted) return
 
-    await run(this.config.uvCommand, ['venv', '--clear', '--python', this.config.pythonVersion, join(this.environmentDir, '.venv')], this.cwd, this.config.startupTimeoutMs)
-    await run(this.config.uvCommand, [
-      'pip', 'install', '--python', this.python(),
-      `marimo[mcp]==${this.config.marimoVersion}`,
-      'zstandard>=0.23,<1',
-    ], this.cwd, this.config.startupTimeoutMs)
+    await run(uvCommand, ['venv', '--clear', '--python', this.config.pythonVersion, join(this.environmentDir, '.venv')], this.cwd, this.config.startupTimeoutMs, uvEnv)
+    const requirements = workspacePath(this.cwd, this.config.uv.requirements, 'uv.requirements')
+    const installArgs = ['pip', 'install', '--python', this.python(), '--requirements', requirements]
+    if (this.config.uv.requireHashes) installArgs.push('--require-hashes')
+    if (this.config.uv.offline) installArgs.push('--offline', '--no-index')
+    if (this.config.uv.indexUrl !== '') installArgs.push('--default-index', this.config.uv.indexUrl)
+    if (this.config.uv.findLinks !== '') installArgs.push('--find-links', workspacePath(this.cwd, this.config.uv.findLinks, 'uv.findLinks'))
+    await run(uvCommand, installArgs, this.cwd, this.config.startupTimeoutMs, uvEnv)
     await writeFile(marker, wanted, 'utf8')
   }
 

@@ -20,7 +20,7 @@ The first version also includes a read-only Python loader for DSH `session.vN.js
 
 - DSH `0.2.0-rc.2` (the MVP pins its DSH peer packages to this exact release candidate).
 - Node.js 22 or later.
-- [`uv`](https://docs.astral.sh/uv/) on `PATH`.
+- [`uv`](https://docs.astral.sh/uv/) 0.11.0 or newer on `PATH` (uv is the only supported Python environment manager).
 - Network access on the first start so uv can provision Python and the pinned packages.
 - A Web profile with the right-sidebar Browser. The bundled patch enables the shipped Browser entry.
 
@@ -86,6 +86,36 @@ Override it in the profile's `cordis.patch.yml`:
 | `startupTimeoutMs` | `180000` | Setup and readiness timeout. |
 
 The notebook, environment, and export path are rejected if they lexically escape the workspace. The notebook parent is also checked after symlink resolution before marimo starts.
+
+### Offline uv provisioning
+
+The Python environment installs from the hashed [requirements lock](python/requirements.lock). Prepare a transferable uv cache on a connected build machine:
+
+```bash
+pnpm run wheelhouse -- dist/offline
+```
+
+The script fills `dist/offline/uv-cache`, removes its verification environment, and proves a second clean installation succeeds with `UV_OFFLINE=1` and hash checking enabled. Transfer that cache—and uv itself—to the bench PC or bake both into the Podman image.
+
+```yaml
+- id: dsh-viztools-runtime
+  config:
+    uv:
+      command: uv
+      minVersion: 0.11.0
+      offline: true
+      cacheDir: .dsh/offline/uv-cache
+      pythonInstallDir: .dsh/offline/python
+      requirements: python/requirements.lock
+      requireHashes: true
+      # Optional alternatives:
+      # findLinks: .dsh/offline/wheels
+      # indexUrl: https://internal.example/simple
+```
+
+For a Podman bundle, copy uv, the verified cache, `python/requirements.lock`, and (when uv manages Python) the populated Python install directory into the image. Configure matching `cacheDir` and `pythonInstallDir`, set `offline: true`, and start once during image validation. A disconnected bench machine then performs no PyPI access.
+
+Changing any uv setting changes the runtime marker and forces deterministic reprovisioning. Startup fails clearly when uv is missing or older than `minVersion`.
 
 ### Optional plan-first gate
 

@@ -2,6 +2,18 @@ import z from '@deepseek-ai/schemastery'
 
 export type RuntimeMode = 'editable' | 'managed-readonly'
 
+export interface UvConfig {
+  command?: string
+  minVersion?: string
+  offline?: boolean
+  indexUrl?: string
+  findLinks?: string
+  cacheDir?: string
+  pythonInstallDir?: string
+  requirements?: string
+  requireHashes?: boolean
+}
+
 export interface Config {
   /** Runtime trust mode. managed-readonly serves only a deployment-owned app and registers no model tools or MCP bridge. */
   mode?: RuntimeMode
@@ -13,7 +25,9 @@ export interface Config {
   managedReportRoot?: string
   /** Directory for the uv-managed Python environment, relative to cwd unless absolute. */
   environmentDir?: string
-  /** uv executable. */
+  /** uv provisioning configuration. */
+  uv?: UvConfig
+  /** Deprecated shorthand for uv.command. */
   uvCommand?: string
   /** Python version uv should provision. */
   pythonVersion?: string
@@ -35,6 +49,17 @@ export interface ResolvedConfig {
   notebook: string
   managedReportRoot: string
   environmentDir: string
+  uv: {
+    command: string
+    minVersion: string
+    offline: boolean
+    indexUrl: string
+    findLinks: string
+    cacheDir: string
+    pythonInstallDir: string
+    requirements: string
+    requireHashes: boolean
+  }
   uvCommand: string
   pythonVersion: string
   marimoVersion: string
@@ -50,6 +75,17 @@ export const Config = z.object({
   notebook: z.string().default('.dsh/notebooks/explanation.py'),
   managedReportRoot: z.string().default('.dsh/reports'),
   environmentDir: z.string().default('.dsh/marimo'),
+  uv: z.object({
+    command: z.string().default('uv'),
+    minVersion: z.string().default('0.11.0'),
+    offline: z.boolean().default(false),
+    indexUrl: z.string().default(''),
+    findLinks: z.string().default(''),
+    cacheDir: z.string().default(''),
+    pythonInstallDir: z.string().default(''),
+    requirements: z.string().default('python/requirements.lock'),
+    requireHashes: z.boolean().default(true),
+  }).default({}),
   uvCommand: z.string().default('uv'),
   pythonVersion: z.string().default('3.12'),
   marimoVersion: z.string().default('0.25.1'),

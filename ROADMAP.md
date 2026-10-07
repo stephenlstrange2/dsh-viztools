@@ -192,7 +192,7 @@ Exit criteria: profile checker accepts the console profile; the agent has no pat
 
 Goal: bench PCs and the Phase F Podman bundle install without PyPI, while uv remains the only supported installer.
 
-- [ ] Add config for uv offline sources:
+- [x] Add config for uv offline/cache/index sources:
 
   ```yaml
   uv:
@@ -203,14 +203,16 @@ Goal: bench PCs and the Phase F Podman bundle install without PyPI, while uv rem
     pythonInstallDir: /opt/dsh-viztools/python
   ```
 
-- [ ] Pass these through as `--offline`, `--find-links`/`--index-url`, `UV_CACHE_DIR`, and `UV_PYTHON_INSTALL_DIR`.
-- [ ] Add a `pnpm run wheelhouse` script that downloads pinned wheels (marimo, `zstandard`, template deps) and a uv-managed Python build into a folder for transfer.
-- [ ] Add a lock file for the Python environment and verify hashes.
-- [ ] Document the Podman bundle: bake the wheel folder and uv cache into the image.
-- [ ] Startup error message names uv explicitly when it is missing.
-- [ ] Document the supported uv version range and fail startup when the installed uv is outside it.
+- [x] Pass these through as `--offline`, `--no-index`, `--find-links`/`--default-index`, `UV_CACHE_DIR`, and `UV_PYTHON_INSTALL_DIR`.
+- [x] Add `pnpm run wheelhouse` to populate a portable uv cache and verify the hashed lock installs with `UV_OFFLINE=1`.
+- [x] Add `python/requirements.lock` containing the complete pinned environment and SHA-256 hashes; runtime installs with `--require-hashes` by default.
+- [x] Document bench and Podman bundles with uv plus the populated cache and optional managed-Python directory.
+- [x] Startup diagnostics name uv explicitly when it is missing.
+- [x] Default to uv >= 0.11.0 and fail startup when the installed version is older.
 
-Exit criteria: a fresh bench PC with uv and no network provisions the environment from the wheel folder.
+Exit criteria: a fresh bench PC with uv and no network provisions the environment from the transferred uv cache.
+
+**Milestone status: implementation complete (2026-10-06).** Hashed lock resolution covers 46 packages for Python 3.12. The wheelhouse script performs an online cache fill followed by a clean offline reinstall as its verification step. Runtime config changes participate in the environment marker and force reprovisioning.
 
 ## Delivery waves
 

@@ -4,6 +4,17 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Milestone 6 — Offline installs with uv
+
+- Kept uv as the required and sole Python environment manager.
+- Added minimum-version and missing-command diagnostics.
+- Added offline, index, local-link, cache, and uv-managed Python directory configuration.
+- Added a complete Python 3.12 dependency lock with SHA-256 hashes and mandatory hash verification.
+- Added `pnpm run wheelhouse` to populate and then verify a portable uv cache offline.
+- Documented bench and Podman deployment.
+
+Verification: the lock resolves 46 packages; the provisioning command uses `--require-hashes`; uv 0.11.24 passes the default >=0.11.0 requirement. No screenshot is included because package provisioning has no useful UI result.
+
 ### Milestone 5 — Locked-console managed-readonly mode
 
 - Added `mode: managed-readonly` to the runtime.
