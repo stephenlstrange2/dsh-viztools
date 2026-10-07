@@ -94,7 +94,7 @@ Exit criteria: grep of the session log for the access token returns nothing; the
 
 Goal: the approved plan carries machine-readable rules that the plugin enforces.
 
-Transport: a `propose_run_rules` tool with a typed schema, approved together with the plan. A fenced `run-rules` YAML block in the plan Markdown is accepted as an authoring convenience but converted to the same typed value before approval.
+Transport: a `propose_run_rules` tool with a typed schema and a dedicated human approval review. The canonical durable value is structured JSON; plan prose may describe the same rules, but Markdown is never parsed as authorization policy.
 
 ```json
 {
@@ -108,13 +108,13 @@ Transport: a `propose_run_rules` tool with a typed schema, approved together wit
 
 Work:
 
-- [ ] Effective policy = deployment policy ∩ approved rules. Never a union.
-- [ ] Reject rules that name a tool outside the deployment's allowed set (a user can deny `replay_tx_only`, but can never enable `bash` in the console).
-- [ ] Cap numeric limits at the deployment limit (`OTX_MAX_REPLAYS` for OTX).
-- [ ] Enforce allow/deny with `ctx.tools.restrict` plus a guard; enforce counts with a guard over durable counters.
-- [ ] Inject free-text `notes` as prompt text and mark them **not enforced**.
-- [ ] Persist `run-rules/approved`, `run-rules/refused-call`, and `run-rules/limit-reached` events.
-- [ ] Extend `explain_plan()` with a "rules vs. what happened" table:
+- [x] Effective policy = deployment policy ∩ approved rules. Never a union.
+- [x] Reject rules that name a tool outside the deployment's allowed set (a user can deny `replay_tx_only`, but can never enable `bash` in the console).
+- [x] Cap numeric limits at the deployment-configured maximum (`OTX_MAX_REPLAYS` maps into `runRules.maxLimits` in OTX).
+- [x] Enforce allow/deny and counts at the shared `tools/pre-execute` boundary, covering native and PTC calls; reconstruct counters from durable tool events on resume.
+- [x] Inject free-text `notes` as scoped prompt text explicitly labelled **advisory; not mechanically enforced**.
+- [x] Persist versioned approved, refused-call, and limit-reached changes in `viztools-run-rules/change` events.
+- [x] Extend `explain_plan()` with a "rules vs. what happened" table:
 
   | Rule | Enforcement | Observed |
   |---|---|---|
@@ -122,9 +122,11 @@ Work:
   | max `replay_tx_only` = 2 | enforced | 2 allowed, 1 refused |
   | no edits after step 40 | advisory | not verified |
 
-Tests: widening attempts rejected, limit above cap rejected, wildcard matching, counters across resume, refusal events recorded.
+Tests cover widening attempts, bad/above-cap limits, exact and prefix matching, deny precedence, durable native/PTC counters, refusal folds, and report projection.
 
 Exit criteria: an OTX session with approved rules shows enforced refusals in both the trajectory and the report.
+
+**Milestone status: implementation complete (2026-10-06).** Typed approval, narrowing validation, native/PTC enforcement, durable counters/refusals, advisory prompt notes, and report projection are implemented and verified. The final OTX-only acceptance screenshot is deferred to the internal profile because public fixtures do not contain OTX tools; no non-evidentiary screenshot is added.
 
 ## Milestone 4 — Automatic report (gap D)
 

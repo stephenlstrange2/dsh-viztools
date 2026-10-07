@@ -4,6 +4,23 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Milestone 3 — Approved narrowing run rules
+
+- Added a typed `propose_run_rules` tool with explicit human approval.
+- Added deployment-owned `allowedTools` and numeric `maxLimits`; approved session rules can only narrow them.
+- Enforced exact/prefix allow and deny patterns plus durable per-tool limits for native and PTC calls.
+- Persisted approved rules, policy refusals, and limit exhaustion as versioned session events.
+- Added advisory notes to the system prompt with an explicit **not mechanically enforced** label.
+- Extended `explain_plan()` with a rules-versus-execution table and refusal totals.
+
+Security implication: a session rule cannot enable a tool outside the deployment allowlist or raise a server-owned numeric cap. Deny rules take precedence over allow rules.
+
+Verification: wildcard and deny precedence, widening rejection, invalid cap rejection, native/PTC durable counters, refusal folds, Python report projection, TypeScript, builds, and package checks.
+
+#### Result
+
+No screenshot is included because the public disposable profile has no OTX tools and would not visibly demonstrate rule enforcement. A meaningful refusal/limit screenshot belongs in the internal OTX acceptance pass.
+
 ### Milestone 2 — Secure automatic sidebar
 
 - Added an authenticated, no-store Host route for the current marimo URL.

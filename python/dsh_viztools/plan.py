@@ -213,6 +213,7 @@ class PlanExplanation:
     calls: list[dict[str, Any]]
     tool_inventory: list[dict[str, Any]]
     mcp_inventory: list[dict[str, Any]]
+    rules: list[dict[str, Any]]
     summary: dict[str, Any]
 
     def to_polars(self, table: str = "calls") -> Any:
@@ -225,6 +226,7 @@ class PlanExplanation:
             "calls": self.calls,
             "tool_inventory": self.tool_inventory,
             "mcp_inventory": self.mcp_inventory,
+            "rules": self.rules,
         }
         if table not in tables:
             raise ValueError(f"table must be one of {', '.join(tables)}")
@@ -339,6 +341,29 @@ def explain_plan(
         {"server": server, "operation": operation, "calls": count}
         for (server, operation), count in mcp_counter.most_common()
     ]
+    approved_rules = None
+    rule_refusals: list[dict[str, Any]] = []
+    for event in session.events:
+        if event.get("type") != "viztools-run-rules/change" or not isinstance(event.get("data"), dict):
+            continue
+        change = event["data"]
+        if change.get("kind") == "approved" and isinstance(change.get("rules"), dict):
+            approved_rules = change["rules"]
+        elif change.get("kind") in {"refused-call", "limit-reached"}:
+            rule_refusals.append(change)
+    rules_table: list[dict[str, Any]] = []
+    if approved_rules is not None:
+        for pattern in approved_rules.get("deny", []):
+            refused = sum(item.get("tool") == pattern or (str(pattern).endswith("*") and str(item.get("tool", "")).startswith(str(pattern)[:-1])) for item in rule_refusals)
+            observed = sum(row["tool_name"] == pattern or (str(pattern).endswith("*") and row["tool_name"].startswith(str(pattern)[:-1])) for row in calls)
+            rules_table.append({"rule": f"deny {pattern}", "enforcement": "enforced", "observed_calls": observed, "refused_calls": refused})
+        for tool, limit in approved_rules.get("limits", {}).items():
+            observed = sum(row["tool_name"] == tool for row in calls)
+            refused = sum(item.get("tool") == tool and item.get("kind") == "limit-reached" for item in rule_refusals)
+            rules_table.append({"rule": f"max {tool} = {limit}", "enforcement": "enforced", "observed_calls": observed, "refused_calls": refused})
+        for note in approved_rules.get("notes", []):
+            rules_table.append({"rule": str(note), "enforcement": "advisory-not-enforced", "observed_calls": None, "refused_calls": None})
+
     mapped = sum(row["attribution"] == "heuristic" for row in calls)
     summary = {
         "submitted_plans": len(plans),
@@ -356,5 +381,7 @@ def explain_plan(
         "heuristically_mapped_calls": mapped,
         "unmapped_calls": len(calls) - mapped,
         "mcp_servers": sorted({row["mcp_server"] for row in calls if row["mcp_server"] is not None}),
+        "approved_run_rules": approved_rules is not None,
+        "run_rule_refusals": len(rule_refusals),
     }
-    return PlanExplanation(plan, phases, calls, tool_inventory, mcp_inventory, summary)
+    return PlanExplanation(plan, phases, calls, tool_inventory, mcp_inventory, rules_table, summary)

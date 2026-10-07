@@ -21,7 +21,10 @@ describe('independent Cordis entries', () => {
 
   it('loads the reserved gate entry inertly', () => {
     const { ctx, warnings } = mockContext()
-    gate.apply(ctx as never, { planFirst: { enabled: false, planningTools: [], denialMessage: 'Plan not approved yet.' } })
+    gate.apply(ctx as never, {
+      planFirst: { enabled: false, planningTools: [], denialMessage: 'Plan not approved yet.' },
+      runRules: { enabled: false, allowedTools: [], maxLimits: {} },
+    })
     expect(gate.name).toBe('dsh-viztools-gate')
     expect(warnings).toEqual([])
   })

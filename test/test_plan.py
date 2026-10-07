@@ -48,6 +48,25 @@ Run tests and confirm failures are fixed.
         self.assertEqual(ptc["error_code"], "EXIT_1")
         self.assertEqual(ptc["duration_ms"], 300)
 
+    def test_reports_approved_rules_and_refusals(self) -> None:
+        directory, session = self.fixture()
+        self.addCleanup(directory.cleanup)
+        session.events.append({
+            "type": "viztools-run-rules/change", "seq": 10, "time": 2_000,
+            "data": {"kind": "approved", "version": 1, "callId": "rules", "rules": {
+                "version": 1, "allow": ["read"], "deny": ["bash"], "limits": {"read": 1}, "notes": ["no edits"],
+            }},
+        })
+        session.events.append({
+            "type": "viztools-run-rules/change", "seq": 11, "time": 2_100,
+            "data": {"kind": "refused-call", "version": 1, "callId": "blocked", "tool": "bash", "reason": "denied"},
+        })
+        explanation = explain_plan(session)
+        self.assertTrue(explanation.summary["approved_run_rules"])
+        self.assertEqual(explanation.summary["run_rule_refusals"], 1)
+        self.assertEqual(len(explanation.rules), 3)
+        self.assertEqual(explanation.rules[-1]["enforcement"], "advisory-not-enforced")
+
     def test_classifies_mcp_names(self) -> None:
         self.assertEqual(classify_tool("read")["kind"], "native")
         self.assertEqual(classify_tool("mcp__context7__search"), {

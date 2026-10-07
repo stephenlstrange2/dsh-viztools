@@ -52,17 +52,32 @@ describe('plan gate durable domain', () => {
   it('normalizes duplicate planning tools', () => {
     expect(resolveGateConfig({
       planFirst: { enabled: true, planningTools: [' read ', 'read', 'grep'], denialMessage: ' denied ' },
+      runRules: { enabled: false, allowedTools: [], maxLimits: {} },
     })).toEqual({
       planFirst: { enabled: true, planningTools: ['read', 'grep'], denialMessage: 'denied' },
+      runRules: { enabled: false, allowedTools: [], maxLimits: {} },
     })
+  })
+
+  it('rejects widening run rules configuration and bad caps', () => {
+    expect(() => resolveGateConfig({
+      planFirst: { enabled: false, planningTools: [], denialMessage: 'denied' },
+      runRules: { enabled: true, allowedTools: ['read'], maxLimits: { bash: 1 } },
+    })).toThrow(/outside allowedTools/)
+    expect(() => resolveGateConfig({
+      planFirst: { enabled: false, planningTools: [], denialMessage: 'denied' },
+      runRules: { enabled: true, allowedTools: ['read'], maxLimits: { read: 0 } },
+    })).toThrow(/positive integer/)
   })
 
   it('rejects blank planning tools and messages', () => {
     expect(() => resolveGateConfig({
       planFirst: { enabled: true, planningTools: [''], denialMessage: 'denied' },
+      runRules: { enabled: false, allowedTools: [], maxLimits: {} },
     })).toThrow(/non-empty/)
     expect(() => resolveGateConfig({
       planFirst: { enabled: true, planningTools: [], denialMessage: '   ' },
+      runRules: { enabled: false, allowedTools: [], maxLimits: {} },
     })).toThrow(/denialMessage/)
   })
 })

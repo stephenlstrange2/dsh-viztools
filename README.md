@@ -105,6 +105,28 @@ New and unapproved resumed sessions enter plan mode. Before a positive `exit_pla
 
 The gate enforces both native calls and nested PTC dispatches. Plan mode alone is not treated as authorization, so `/plan off`, a dismissed review, or **Keep planning** does not open it.
 
+### Approved run rules
+
+The same gate entry can enable typed, user-approved rules that only narrow the deployment's tool policy:
+
+```yaml
+- id: dsh-viztools-gate
+  name: dsh-viztools/gate
+  config:
+    planFirst:
+      enabled: true
+      planningTools: [bench_status, describe_profile, parse_snoop, get_messages]
+    runRules:
+      enabled: true
+      allowedTools: [bench_status, describe_profile, parse_snoop, get_messages, replay_tx_only, diff, finalize_run]
+      maxLimits:
+        replay_tx_only: 2
+```
+
+The agent calls `propose_run_rules` with structured `allow`, `deny`, `limits`, and `notes`. The plugin rejects any rule outside `allowedTools` or any limit above `maxLimits`, then asks the user to approve the complete value. Approved allow/deny and limits are enforced for native and PTC calls. Refusals and limit exhaustion are durable. Free-text notes enter the system prompt labelled **advisory; not mechanically enforced**.
+
+`explain_plan()` exposes a `rules` table showing enforced rules, observed calls, refused calls, and advisory notes.
+
 ### Secure automatic sidebar
 
 When a Session appears on screen, the Client plugin requests the marimo URL from `/api/viztools/sidebar-url` and opens it with DSH's existing Browser tab. The route is protected by DSH's Host/Origin and browser-session authentication, sends `Cache-Control: no-store`, and rejects unauthenticated requests. The model-facing `marimo_status` tool returns only the notebook path, loopback port, and marimo version.
