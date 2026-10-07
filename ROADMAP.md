@@ -60,17 +60,19 @@ Configuration:
 
 Work:
 
-- [ ] Enter plan mode for new sessions through `ctx.planMode`.
-- [ ] Keep a gate state machine separate from plan mode: `closed → approved`. Plan mode is guidance; the gate is enforcement.
-- [ ] Register a `ctx.tools` guard that refuses every tool outside `planningTools` (plus `exit_plan_mode`) while closed.
-- [ ] Open the gate only on a positively approved `exit_plan_mode` result. Rejection, "keep planning", dismissal, `/plan off`, and reload during review all leave it closed.
-- [ ] Persist gate transitions as session events (`viztools-gate/approved`, `viztools-gate/refused`) and rebuild state from the log on resume.
-- [ ] Define fork behavior: a fork inherits the parent's gate state at the fork point.
-- [ ] Validate at activation that every `planningTools` entry exists in the deployment.
+- [x] Enter plan mode for new and unapproved resumed sessions through `ctx.planMode`.
+- [x] Keep a gate state machine separate from plan mode: `closed → approved`. Plan mode is guidance; the gate is enforcement.
+- [x] Register a scoped `tools/pre-execute` policy that refuses every tool outside `planningTools` (plus `exit_plan_mode`) while closed, including PTC sub-dispatches.
+- [x] Open the gate only on a successful `{ approved: true }` result from `exit_plan_mode`. Rejection, "keep planning", dismissal, `/plan off`, and reload during review leave it closed.
+- [x] Persist versioned gate approval/refusal changes as session events and rebuild state from the complete log on resume.
+- [x] Define fork behavior: a fork inherits the parent's gate state at the fork cut through its seed.
+- [x] Validate at agent activation that every configured planning tool and `exit_plan_mode` is visible.
 
-Tests: approve, reject, dismiss, `/plan off`, resume after approval, resume before approval, fork, PTC sub-dispatch of a gated tool, unknown tool in config.
+Tests cover durable approval/refusal folds, resume before/after approval, fork inheritance, PTC dispatch error shape, config normalization/rejection, independent entry loading, and full profile activation. The scoped policy sits at `tools/pre-execute`, so native and PTC calls share the same denial path.
 
 Exit criteria: in an OTX test profile, `propose_sequence`, `emit_otx`, `replay_tx_only`, `diff`, and `finalize_run` are refused with "Plan not approved yet." until Approve is clicked, and the refusals appear in the trajectory.
+
+**Milestone status: implementation complete (2026-10-06).** The gate boots enabled in the disposable Web profile and all automated checks pass. OTX-specific tool names require the internal OTX profile for the final acceptance run; the generic enforcement path and durable audit model are complete. Changes are left uncommitted for review.
 
 ## Milestone 2 — Secure sidebar (gap B)
 

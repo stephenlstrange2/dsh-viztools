@@ -87,6 +87,24 @@ Override it in the profile's `cordis.patch.yml`:
 
 The notebook, environment, and export path are rejected if they lexically escape the workspace. The notebook parent is also checked after symlink resolution before marimo starts.
 
+### Optional plan-first gate
+
+The enforcement entry is separate from the marimo runtime. Add it to a profile that must block execution until a plan is approved:
+
+```yaml
+- id: dsh-viztools-gate
+  name: dsh-viztools/gate
+  config:
+    planFirst:
+      enabled: true
+      planningTools: [bench_status, describe_profile, parse_snoop, get_messages]
+      denialMessage: Plan not approved yet.
+```
+
+New and unapproved resumed sessions enter plan mode. Before a positive `exit_plan_mode` review, only the configured planning tools and `exit_plan_mode` may execute; every refusal is recorded durably. Approval survives resume, and forks inherit the gate state at their fork point. The entry fails agent activation if a configured planning tool is unavailable.
+
+The gate enforces both native calls and nested PTC dispatches. Plan mode alone is not treated as authorization, so `/plan off`, a dismissed review, or **Keep planning** does not open it.
+
 ## Explain a DSH session
 
 In a notebook cell:
