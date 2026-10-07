@@ -326,7 +326,7 @@ Do not install editable mode in a locked production/OTX console. A later read-on
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for the plan to support locked internal consoles: plan gate, secure sidebar, approved run rules, automatic reports, read-only mode, and offline uv installs. Version support and exact DSH peer-pin policy are documented in [COMPATIBILITY.md](COMPATIBILITY.md). Completed milestone results and screenshots are recorded in [CHANGELOG.md](CHANGELOG.md).
+See [ROADMAP.md](ROADMAP.md) for the implementation history and remaining release gate. Version support and exact DSH peer-pin policy are documented in [COMPATIBILITY.md](COMPATIBILITY.md). Completed milestone results are recorded in [CHANGELOG.md](CHANGELOG.md). Security boundaries are in [THREAT_MODEL.md](THREAT_MODEL.md), and [SECURITY_REVIEW.md](SECURITY_REVIEW.md) lists automated evidence plus the internal checks required before v1 publication.
 
 ## Development
 

@@ -8,6 +8,12 @@ import type { ResolvedConfig } from './config.js'
 import { probeUv } from './uv.js'
 
 const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export const BUNDLED_REQUIREMENTS = join(PACKAGE_ROOT, 'python', 'requirements.lock')
+
+export function resolveRequirementsPath(cwd: string, configured: string): string {
+  if (configured === '' || configured === 'python/requirements.lock') return BUNDLED_REQUIREMENTS
+  return workspacePath(cwd, configured, 'uv.requirements')
+}
 const NOTEBOOK_TEMPLATE = `import marimo\n\n__generated_with = "0.25.1"\napp = marimo.App(width="medium")\n\n\n@app.cell\ndef _():\n    import marimo as mo\n    return (mo,)\n\n\n@app.cell\ndef _(mo):\n    mo.md("""# DSH explanation\n\nThis live notebook is managed by **dsh-viztools**. Ask the agent to explain a run or add a visualization.\n""")\n    return\n\n\nif __name__ == "__main__":\n    app.run()\n`
 
 export interface RuntimeStatus {
@@ -142,7 +148,7 @@ export class MarimoRuntime {
     if (installed === wanted) return
 
     await run(uvCommand, ['venv', '--clear', '--python', this.config.pythonVersion, join(this.environmentDir, '.venv')], this.cwd, this.config.startupTimeoutMs, uvEnv)
-    const requirements = workspacePath(this.cwd, this.config.uv.requirements, 'uv.requirements')
+    const requirements = resolveRequirementsPath(this.cwd, this.config.uv.requirements)
     const installArgs = ['pip', 'install', '--python', this.python(), '--requirements', requirements]
     if (this.config.uv.requireHashes) installArgs.push('--require-hashes')
     if (this.config.uv.offline) installArgs.push('--offline', '--no-index')

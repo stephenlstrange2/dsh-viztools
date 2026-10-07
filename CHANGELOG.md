@@ -4,6 +4,21 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Fixed
+
+- Resolve the default hashed Python requirements file relative to the installed `dsh-viztools` package instead of the DSH process working directory. This fixes activation from workspaces such as `~/d` where `python/requirements.lock` does not exist.
+
+### Milestone 7 — Hardening and v1 release preparation
+
+- Added CI for the supported Node, uv, and DSH compatibility matrix.
+- Added an npm provenance release workflow gated by full verification and tag/version matching.
+- Added `verify:release` checks for exact DSH peers, required exports, and packaged security documents.
+- Added an OTX-like durable lifecycle test covering plan approval, rule narrowing/limit evidence, terminal report settlement, and locked-profile validation.
+- Added a formal security-review checklist separating automated evidence from internal manual acceptance.
+- Updated the compatibility matrix with the v1 release-candidate state.
+
+No publish or version bump was performed. Package version remains `0.1.0` until internal OTX/profile-checker/Podman/template/retention items in `SECURITY_REVIEW.md` are signed off.
+
 ### Milestone 6 — Offline installs with uv
 
 - Kept uv as the required and sole Python environment manager.

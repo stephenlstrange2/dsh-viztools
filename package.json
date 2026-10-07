@@ -45,6 +45,7 @@
     "COMPATIBILITY.md",
     "CHANGELOG.md",
     "THREAT_MODEL.md",
+    "SECURITY_REVIEW.md",
     "LICENSE"
   ],
   "license": "MIT",
@@ -114,6 +115,7 @@
     "typecheck": "tsc --noEmit",
     "test:client-bundle": "node scripts/test-client-bundle.mjs",
     "wheelhouse": "node scripts/build-wheelhouse.mjs",
+    "verify:release": "node scripts/verify-release.mjs --dsh 0.2.0-rc.2",
     "test": "vitest run && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python python3 -m unittest discover -s test -p 'test_*.py'",
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm test:client-bundle"
   },

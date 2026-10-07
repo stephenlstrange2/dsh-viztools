@@ -241,10 +241,12 @@ Before an internal rollout, the following scenarios must pass end to end:
 
 ## Milestone 7 — Hardening and release
 
-- [ ] Threat model document covering token flow, template trust, policy intersection, and refusal auditing.
-- [ ] CI matrix across supported DSH versions.
-- [ ] End-to-end test in a disposable OTX-like profile: plan gate → approval → rules → finalize → report.
-- [ ] Publish `v1.0.0`.
+- [x] Threat model and security-review checklist cover token flow, template trust, policy intersection, refusal auditing, offline supply chain, and residual internal acceptance.
+- [x] CI matrix pins Node, uv, and every supported DSH version; release workflow reruns verification before npm provenance publishing.
+- [x] OTX-like durable lifecycle test covers closed gate → approval → narrowing rules/limit refusal → terminal report → locked-profile validation.
+- [ ] Publish `v1.0.0` only after the manual/internal items in `SECURITY_REVIEW.md` are signed off. Publishing is intentionally not performed by this milestone implementation.
+
+**Milestone status: release candidate prepared (2026-10-06).** Automated hardening and release infrastructure are complete. Package version remains `0.1.0` so no false v1 release is represented before internal OTX, profile-checker, Podman, template, and retention review. `scripts/verify-release.mjs --tag v1.0.0` will require package version `1.0.0` at the actual release commit.
 
 ## Dependency order
 

@@ -21,5 +21,6 @@
 | dsh-viztools | DSH | Status |
 |---|---|---|
 | 0.1.x | 0.2.0-rc.2 | Supported and tested |
+| 1.0.0 release candidate | 0.2.0-rc.2 | CI and fixture verified; internal OTX acceptance pending |
 
 The package's Cordis peer (`@deepseek-ai/cordis`) remains on the compatible `~4.0.4` range because it is independently versioned and already uses stable range semantics.
