@@ -9,12 +9,6 @@ import { approvedGateChange, otxFinalizeCall, otxPtcStart, otxToolResultContentB
  * contract in test output.
  */
 describe('OTX hardening release blockers', () => {
-  it.todo('monotonic guard denies emit_otx even when an earlier listener returns ask/allow')
-  it.todo('unknown agent after gate reload is rebuilt from log or denied fail-closed')
-  it.todo('deployment allowedTools is enforced when no session rules are approved')
-  it.todo('empty allow cannot widen deployment policy')
-  it.todo('wildcard proposal is rejected when it also matches a deployment-denied registry tool')
-  it.todo('deployment maxLimits apply without session limits')
 
   it.todo('later rule approval merges denies and lowers limits instead of replacing policy')
   it.todo('live accepted-call count equals replayed count after refusal and resume')

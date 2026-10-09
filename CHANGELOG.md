@@ -4,6 +4,13 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 1
+
+- Moved authoritative plan/run denial into `ToolRuntime.guard`, which remains monotonic after earlier `allow` or `ask` listeners.
+- Added fail-closed unknown-agent decisions, deployment allowlist enforcement without session rules, and deployment default limits.
+- Expand wildcard proposals against the full registry and reject patterns overlapping deployment-denied tools.
+- Reduced OTX release blockers from 22 to 16 with real ToolRuntime listener-order tests.
+
 ### Security — OTX hardening baseline
 
 - Blocked v1 and locked-console promotion after architecture review found bypassable listener ordering, incomplete deployment-policy enforcement, replay-unstable counters, premature terminal reports, missing locked report publication, and runtime secret/path/privacy gaps.

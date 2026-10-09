@@ -6,7 +6,7 @@ Phase 0 freezes the 2026-10-09 review findings as 22 named acceptance contracts 
 
 ## Phase sequence
 
-1. Monotonic fail-closed gate and deployment baseline
+1. Monotonic fail-closed gate and deployment baseline — **complete 2026-10-09**
 2. Monotonic rule merges, replay-stable counters, deployment fingerprint, fork policy
 3. Post-commit terminal report trigger, timeout/cancellation, turn coalescing
 4. Stable locked placeholder/current-report app
@@ -20,7 +20,7 @@ Complete exactly one phase at a time. Convert its todo tests into active asserti
 ## Baseline evidence
 
 ```text
-44 passed | 22 todo
+52 passed | 16 todo
 9 Python tests passed
 ```
 
