@@ -34,7 +34,7 @@ export function apply(ctx: ClientContext): void {
     const sessionId = ctx.sidebarRight.mounted.getSnapshot()
     if (sessionId === undefined || ctx.sidebarRightTabs.get('browser') === undefined) return
     const attempt = ++generation
-    const response = await globalThis.fetch('/api/viztools/sidebar-url', {
+    const response = await globalThis.fetch(`/api/viztools/sidebar-url?session=${encodeURIComponent(String(sessionId))}`, {
       method: 'GET',
       headers: { accept: 'application/json' },
       cache: 'no-store',

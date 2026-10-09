@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeys, reportKey, REPORT_EVENT, type ReportChange } from './report-domain.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
+import { publishManagedState } from './managed-state.js'
 
 export { completedReportKeys, reportKey, REPORT_EVENT } from './report-domain.js'
 export type { ReportChange } from './report-domain.js'
@@ -154,14 +155,22 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
         await runReportCommand(python(environmentDir), [
           '-m', 'marimo', 'export', 'html', notebook, '--force', config.includeCode ? '--include-code' : '--no-include-code', '-o', html,
         ], cwd, { PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${process.platform === 'win32' ? ';' : ':'}${process.env.PYTHONPATH}` : pythonPath }, config.timeoutMs, config.killGraceMs)
+        await publishManagedState(outputRoot, { status: 'available', sessionId: String(agent.id), html, updatedAt: Date.now() })
         append(agent, { kind: 'available', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, notebook, html, inputs: inputsPath })
       } catch (error) {
-        append(agent, { kind: 'failed', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, reason: error instanceof Error ? error.message : String(error) })
+        const reason = error instanceof Error ? error.message : String(error)
+        await publishManagedState(outputRoot, { status: 'failed', sessionId: String(agent.id), reason, updatedAt: Date.now() })
+        append(agent, { kind: 'failed', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, reason })
       }
     })().finally(() => inFlight.delete(key))
     inFlight.set(key, work)
     return work
   }
+
+  ctx.on('agent/created', ({ agent }) => {
+    void publishManagedState(outputRoot, { status: 'pending', sessionId: String(agent.id), updatedAt: Date.now() })
+    return undefined
+  })
 
   ctx.on('tools/result', (exec) => {
     const agent = exec.agent

@@ -21,10 +21,10 @@ describe('managed-readonly mode', () => {
     expect(result.errors).toHaveLength(2)
   })
 
-  it('rejects notebooks outside the managed report root', () => {
-    const result = checkLockedProfile({ ...base, notebook: '.dsh/notebooks/freeform.py' })
+  it('rejects an empty managed report root', () => {
+    const result = checkLockedProfile({ ...base, managedReportRoot: '' })
     expect(result.ok).toBe(false)
-    expect(result.errors).toContain('locked console notebook must be below managedReportRoot')
+    expect(result.errors).toContain('locked console requires managedReportRoot')
   })
 
   it('uses marimo run and omits code and tracebacks', () => {

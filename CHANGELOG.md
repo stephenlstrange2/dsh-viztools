@@ -4,6 +4,13 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 4
+
+- Locked mode now always serves one bundled trusted managed-report app, so a fresh console boots with a Plan in progress placeholder.
+- The report service atomically publishes per-session pending, available, or failed state files.
+- The authenticated Client passes the mounted Session ID to the stable app; switching Sessions selects the corresponding state without changing notebook files or restarting marimo.
+- Reduced outstanding OTX blockers from 8 to 7.
+
 ### Security — OTX hardening Phase 3
 
 - Terminal tools now become pending triggers at `tools/result`; generation starts only after the matching durable `tool/result` event is appended.

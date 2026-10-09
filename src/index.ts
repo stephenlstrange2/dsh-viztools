@@ -100,12 +100,17 @@ export async function apply(ctx: Context, config: ResolvedConfig): Promise<void>
     path: '/api/viztools/sidebar-url',
     methods: ['GET'],
     requestBody: 'buffered',
-    fetch: async () => Response.json({
-      browserUrl: runtime.status().browserUrl,
+    fetch: async (request) => {
+      const sessionId = new URL(request.url).searchParams.get('session')
+      const browserUrl = new URL(runtime.status().browserUrl)
+      if (sessionId !== null) browserUrl.searchParams.set('session', sessionId)
+      return Response.json({
+      browserUrl: browserUrl.href,
       notebook: runtime.status().notebook,
       marimoVersion: runtime.status().marimoVersion,
       processStartedAt: runtime.status().processStartedAt,
-    }, { headers: { 'cache-control': 'no-store' } }),
+      }, { headers: { 'cache-control': 'no-store' } })
+    },
   }), 'dsh-viztools.sidebar-url')
 
   if (config.mode === 'editable') {

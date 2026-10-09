@@ -31,7 +31,7 @@ window.__ModuleLoader__.load({
     		const sessionId = ctx.sidebarRight.mounted.getSnapshot();
     		if (sessionId === void 0 || ctx.sidebarRightTabs.get("browser") === void 0) return;
     		const attempt = ++generation;
-    		const response = await globalThis.fetch("/api/viztools/sidebar-url", {
+    		const response = await globalThis.fetch(`/api/viztools/sidebar-url?session=${encodeURIComponent(String(sessionId))}`, {
     			method: "GET",
     			headers: { accept: "application/json" },
     			cache: "no-store"

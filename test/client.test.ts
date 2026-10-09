@@ -24,7 +24,7 @@ describe('secure sidebar payload', () => {
 
   it('uses an origin-absolute authenticated route and waits for Browser registration', () => {
     const source = readFileSync(new URL('../src/client.ts', import.meta.url), 'utf8')
-    expect(source).toContain("fetch('/api/viztools/sidebar-url'")
+    expect(source).toContain('sidebar-url?session=${encodeURIComponent(String(sessionId))}')
     expect(source).toContain("sidebarRightTabs.get('browser')")
   })
 })

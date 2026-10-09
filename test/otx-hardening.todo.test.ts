@@ -12,7 +12,6 @@ describe('OTX hardening release blockers', () => {
 
   it.todo('PTC plan flow can reach exit_plan_mode without opening non-planning tools')
 
-  it.todo('fresh locked console serves plan-in-progress placeholder then active report')
   it.todo('run id extracted from durable start_run result resolves report artifacts')
 
   it.todo('token is absent from process argv and supplied through a mode-0600 token file')
