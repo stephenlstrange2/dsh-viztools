@@ -2,7 +2,7 @@ import { defineConfig } from 'tsdown'
 
 export default defineConfig([
   {
-    entry: ['src/index.ts', 'src/gate.ts', 'src/report.ts', 'src/profile-check.ts'],
+    entry: ['src/index.ts', 'src/client-host.ts', 'src/gate.ts', 'src/report.ts', 'src/profile-check.ts'],
     outDir: 'lib',
     format: 'esm',
     dts: true,

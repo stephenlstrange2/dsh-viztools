@@ -11,6 +11,11 @@ describe('model-facing status security', () => {
     expect(source.slice(toolStart, toolEnd)).not.toContain('browserUrl')
   })
 
+  it('makes the managed notebook path authoritative in the model tool', () => {
+    const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+    expect(source).toContain('Always use this exact path for notebook edits')
+  })
+
   it('keeps the secret URL in the authenticated Host RPC path', () => {
     const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
     expect(source).toContain("path: '/api/viztools/sidebar-url'")

@@ -21,7 +21,7 @@ const PACKAGE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 function registerTools(ctx: Context, runtime: MarimoRuntime): void {
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'marimo_status',
-    description: 'Get the live marimo notebook path and authenticated sidebar URL.',
+    description: 'Get the authoritative live marimo notebook path and readiness metadata. Always use this exact path for notebook edits; never infer a parent .dsh/notebooks path.',
     parameters: {},
     output: {
       schema: {
@@ -74,7 +74,7 @@ function registerSkill(ctx: Context): void {
     source: 'bundled',
     provider: 'dsh-viztools',
     resourceBase: { kind: 'directory', path: resolve(PACKAGE_ROOT, 'skills', 'explain-with-notebook') },
-    content: `# Explain with marimo\n\nUse the live marimo code-mode MCP tools to inspect and edit the managed notebook.\n\n1. Read the source facts before editing. For a DSH trajectory, import \`dsh_viztools.session.load_session\`.\n2. Add small reactive cells: source/loading, transformations, then a flow, table, chart, or timeline.\n3. Put a short plain-language \`mo.md\` explanation next to every important result.\n4. Keep every reported number computed from source data; do not hand-copy totals.\n5. Run or inspect affected cells and fix errors.\n6. Call \`marimo_export_html\` at the end and link both the notebook source and HTML export in your reply.\n\nThe notebook executes Python with workspace-level authority. Treat code changes as shell-equivalent and stay inside the workspace.`,
+    content: `# Explain with marimo\n\nCall \`marimo_status\` first and use its exact absolute notebook path; never infer a parent \`.dsh/notebooks\` path. The root agent owns notebook edits and export. Subagents may analyze explicitly supplied data but must not edit the shared notebook and must receive the evidence rules in their prompt. Read source facts, build small reactive cells with computed explanations, and validate the exact managed notebook. Any failed write, MCP call, kernel check, or export is a hard failure—fix it before claiming success. Finish with \`marimo_export_html\`, verify expected content, and link the authoritative source and export.`,
   }), 'dsh-viztools.skill')
 
   ctx.effect(() => ctx.skills.register({
@@ -104,6 +104,7 @@ export async function apply(ctx: Context, config: ResolvedConfig): Promise<void>
       browserUrl: runtime.status().browserUrl,
       notebook: runtime.status().notebook,
       marimoVersion: runtime.status().marimoVersion,
+      processStartedAt: runtime.status().processStartedAt,
     }, { headers: { 'cache-control': 'no-store' } }),
   }), 'dsh-viztools.sidebar-url')
 

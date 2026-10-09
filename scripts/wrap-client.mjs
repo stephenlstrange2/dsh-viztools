@@ -20,5 +20,5 @@ body = body.replace(/^export \{([^}]+)\};\n?$/m, (_match, names) => {
     return `exports.${exported ?? local} = ${local};`
   }).join('\n')
 })
-const wrapped = `window.__ModuleLoader__.load({\n  id: "dsh-viztools",\n  factory: (require) => {\n    var module = { exports: {} };\n    var exports = module.exports;\n    ${bindings.join('\n    ')}\n${body.split('\n').map((line) => `    ${line}`).join('\n')}\n    return module.exports;\n  },\n});\n//# sourceMappingURL=client.js.map\n`
+const wrapped = `window.__ModuleLoader__.load({\n  id: "dsh-viztools-client-host",\n  factory: (require) => {\n    var module = { exports: {} };\n    var exports = module.exports;\n    ${bindings.join('\n    ')}\n${body.split('\n').map((line) => `    ${line}`).join('\n')}\n    return module.exports;\n  },\n});\n//# sourceMappingURL=client.js.map\n`
 await writeFile(path, wrapped, 'utf8')

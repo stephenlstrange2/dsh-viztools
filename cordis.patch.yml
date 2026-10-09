@@ -3,4 +3,6 @@
 - insert:
     - id: dsh-viztools-runtime
       name: dsh-viztools/runtime
+    - id: dsh-viztools-client-host
+      name: ./client-host/index.js
 

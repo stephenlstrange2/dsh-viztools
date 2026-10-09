@@ -6,6 +6,9 @@ All notable project changes are recorded here by roadmap milestone.
 
 ### Fixed
 
+- Load the sidebar Client through a dedicated `dsh-viztools-client-host` package boundary with matching module identity; the previous runtime-only entry never entered the Web boot graph, so automatic side-by-side opening could not run.
+- Treat the `marimo_status.notebook` value as authoritative in both notebook skills, prohibit subagents from mutating the shared notebook, and require failed writes, kernel checks, and exports to be repaired before success is claimed.
+- Reopen the Browser tab when the marimo runtime identity changes, avoiding stale tabs after a DSH or marimo restart.
 - Resolve the default hashed Python requirements file relative to the installed `dsh-viztools` package instead of the DSH process working directory. This fixes activation from workspaces such as `~/d` where `python/requirements.lock` does not exist.
 
 ### Milestone 7 — Hardening and v1 release preparation

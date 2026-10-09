@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import * as clientHost from '../src/client-host.js'
 import * as gate from '../src/gate.js'
 import * as report from '../src/report.js'
 import * as runtime from '../src/index.js'
@@ -17,6 +18,11 @@ describe('independent Cordis entries', () => {
   it('exports the runtime entry separately', () => {
     expect(runtime.name).toBe('dsh-viztools-runtime')
     expect(typeof runtime.apply).toBe('function')
+  })
+
+  it('exports a separate host roster entry for the Client bundle', () => {
+    expect(clientHost.name).toBe('dsh-viztools-client-host')
+    expect(typeof clientHost.apply).toBe('function')
   })
 
   it('loads the reserved gate entry inertly', () => {

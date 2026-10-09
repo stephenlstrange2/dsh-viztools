@@ -14,6 +14,10 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
+    "./client-host": {
+      "types": "./lib/client-host.d.ts",
+      "default": "./lib/client-host.js"
+    },
     "./gate": {
       "types": "./lib/gate.d.ts",
       "default": "./lib/gate.js"
@@ -35,6 +39,7 @@
   },
   "files": [
     "lib",
+    "client-host",
     "cordis.patch.yml",
     "python",
     "skills",
@@ -66,7 +71,8 @@
         "@deepseek-ai/dsh-client-ui-sidebar-right",
         "@deepseek-ai/dsh-client-ui-sidebar-browser"
       ],
-      "platform": "web"
+      "platform": "web",
+      "immediately": true
     }
   },
   "peerDependencies": {
@@ -110,7 +116,7 @@
     "vitest": "^3.2.0"
   },
   "scripts": {
-    "build": "tsdown && node scripts/wrap-client.mjs",
+    "build": "tsdown && node scripts/wrap-client.mjs && node scripts/sync-client-host.mjs",
     "watch": "tsdown --watch",
     "typecheck": "tsc --noEmit",
     "test:client-bundle": "node scripts/test-client-bundle.mjs",

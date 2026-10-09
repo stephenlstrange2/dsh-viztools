@@ -24,6 +24,7 @@ export interface RuntimeStatus {
   readonly port: number
   readonly pid: number
   readonly marimoVersion: string
+  readonly processStartedAt: number
 }
 
 function within(root: string, candidate: string): boolean {
@@ -209,6 +210,7 @@ export class MarimoRuntime {
       port,
       pid: child.pid ?? -1,
       marimoVersion: this.config.marimoVersion,
+      processStartedAt: Date.now(),
     }
     return this.current
   }

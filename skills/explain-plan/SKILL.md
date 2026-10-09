@@ -7,8 +7,9 @@ description: Compare a submitted DSH plan with its execution, including native a
 
 Use the live marimo notebook to explain what an approved or submitted plan proposed and what the trajectory records afterward.
 
-1. Read the session with `dsh_viztools.session.load_session` and call `run.explain_plan()` (or select an earlier submission with `plan_index`).
-2. Inspect `explanation.summary["plan_source"]` before making comparison claims:
+1. Call `marimo_status` first and use its exact `notebook` path; never infer a parent `.dsh/notebooks` path. The root agent owns notebook edits/exports. Subagents may analyze a supplied trajectory but must not mutate the shared notebook and must receive these evidence rules explicitly.
+2. Read the session with `dsh_viztools.session.load_session` and call `run.explain_plan()` (or select an earlier submission with `plan_index`).
+3. Inspect `explanation.summary["plan_source"]` before making comparison claims:
    - `submitted`: use the durable `exit_plan_mode` plan;
    - `user-provided`: label it **User-provided plan; approval not observed**;
    - `reconstructed`: label it **Reconstructed plan; not an approved plan**;

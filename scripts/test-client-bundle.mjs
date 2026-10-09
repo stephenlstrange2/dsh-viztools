@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises'
 import vm from 'node:vm'
 
 const code = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
+const hostedCode = await readFile(new URL('../client-host/client.js', import.meta.url), 'utf8')
+if (hostedCode !== code) throw new Error('client-host/client.js is not synchronized with lib/client.js')
 let registration
 vm.runInNewContext(code, {
   window: {
@@ -12,8 +14,8 @@ vm.runInNewContext(code, {
     },
   },
 })
-if (registration?.id !== 'dsh-viztools' || typeof registration.factory !== 'function') {
-  throw new Error('client bundle did not register the dsh-viztools module')
+if (registration?.id !== 'dsh-viztools-client-host' || typeof registration.factory !== 'function') {
+  throw new Error('client bundle did not register the dsh-viztools-client-host module')
 }
 const exports = registration.factory(() => {
   throw new Error('client bundle unexpectedly requested an external at materialization')
