@@ -4,6 +4,14 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 3
+
+- Terminal tools now become pending triggers at `tools/result`; generation starts only after the matching durable `tool/result` event is appended.
+- Modern `message.source.callId` and `tool-result` content-block identities are supported.
+- Report exports have bounded timeout, SIGTERM grace, then SIGKILL, with durable failure evidence.
+- Turn-stop reporting schedules asynchronously and coalesces by session, turn, and template version instead of blocking turn closure or keying every changing sequence.
+- Reduced outstanding OTX blockers from 12 to 8.
+
 ### Security — OTX hardening Phase 2
 
 - Versioned approved rules now merge monotonically: allow intersection, deny union, minimum limits, and deduplicated advisory notes.

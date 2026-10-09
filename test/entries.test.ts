@@ -39,7 +39,7 @@ describe('independent Cordis entries', () => {
     const { ctx, warnings } = mockContext()
     report.apply(ctx as never, {
       enabled: false, cwd: '', triggerTools: [], triggerOnTurnStop: false, template: '', templateVersion: '1',
-      outputDir: '.dsh/reports', includeCode: false, environmentDir: '.dsh/marimo', extraInputs: {},
+      outputDir: '.dsh/reports', includeCode: false, environmentDir: '.dsh/marimo', extraInputs: {}, timeoutMs: 120000, killGraceMs: 2000,
     })
     expect(report.name).toBe('dsh-viztools-report')
     expect(warnings).toEqual([])

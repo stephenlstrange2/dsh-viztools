@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeys, reportKey, REPORT_EVENT, type ReportChange } from './report-domain.js'
+import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 
 export { completedReportKeys, reportKey, REPORT_EVENT } from './report-domain.js'
 export type { ReportChange } from './report-domain.js'
@@ -29,6 +30,8 @@ export interface Config {
   includeCode?: boolean
   environmentDir?: string
   extraInputs?: Record<string, string>
+  timeoutMs?: number
+  killGraceMs?: number
 }
 
 export interface ResolvedConfig {
@@ -42,6 +45,8 @@ export interface ResolvedConfig {
   includeCode: boolean
   environmentDir: string
   extraInputs: Record<string, string>
+  timeoutMs: number
+  killGraceMs: number
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -55,6 +60,8 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   includeCode: z.boolean().default(false),
   environmentDir: z.string().default('.dsh/marimo'),
   extraInputs: z.dict(String).default({}),
+  timeoutMs: z.number().min(1_000).default(120_000),
+  killGraceMs: z.number().min(100).default(2_000),
 })
 
 declare module '@deepseek-ai/dsh-session/types' {
@@ -78,13 +85,28 @@ function python(environmentDir: string): string {
   return process.platform === 'win32' ? join(environmentDir, '.venv', 'Scripts', 'python.exe') : join(environmentDir, '.venv', 'bin', 'python')
 }
 
-async function command(executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
+export async function runReportCommand(executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, timeoutMs: number, killGraceMs: number): Promise<void> {
   await new Promise<void>((resolvePromise, reject) => {
     const child = spawn(executable, args, { cwd, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
     const stderr: Buffer[] = []
+    let timedOut = false
+    let killTimer: NodeJS.Timeout | undefined
+    const timeout = setTimeout(() => {
+      timedOut = true
+      child.kill('SIGTERM')
+      killTimer = setTimeout(() => child.kill('SIGKILL'), killGraceMs)
+      killTimer.unref()
+    }, timeoutMs)
+    timeout.unref()
     child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
-    child.once('error', reject)
-    child.once('exit', (code) => code === 0 ? resolvePromise() : reject(new Error(Buffer.concat(stderr).toString('utf8').trim() || `report export exited ${code}`)))
+    child.once('error', (error) => { clearTimeout(timeout); if (killTimer !== undefined) clearTimeout(killTimer); reject(error) })
+    child.once('exit', (code) => {
+      clearTimeout(timeout)
+      if (killTimer !== undefined) clearTimeout(killTimer)
+      if (timedOut) reject(new Error(`report export timed out after ${timeoutMs}ms`))
+      else if (code === 0) resolvePromise()
+      else reject(new Error(Buffer.concat(stderr).toString('utf8').trim() || `report export exited ${code}`))
+    })
   })
 }
 
@@ -108,6 +130,8 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const environmentDir = safePath(cwd, config.environmentDir, 'report environmentDir')
   const template = config.template === '' ? DEFAULT_TEMPLATE : safePath(cwd, config.template, 'report template')
   const inFlight = new Map<string, Promise<void>>()
+  const pending = new WeakMap<Agent, Map<string, PendingTerminalTrigger>>()
+  const turnScheduled = new Set<string>()
 
   const generate = (agent: Agent, triggerSeq: number, trigger: string): Promise<void> => {
     const key = reportKey(String(agent.id), triggerSeq, config.templateVersion)
@@ -127,9 +151,9 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
         await copyFile(template, notebook)
         await writeFile(inputsPath, JSON.stringify({ sessionId: String(agent.id), trigger, triggerSeq, trajectory, extras }, null, 2), 'utf8')
         const pythonPath = join(PACKAGE_ROOT, 'python')
-        await command(python(environmentDir), [
+        await runReportCommand(python(environmentDir), [
           '-m', 'marimo', 'export', 'html', notebook, '--force', config.includeCode ? '--include-code' : '--no-include-code', '-o', html,
-        ], cwd, { PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${process.platform === 'win32' ? ';' : ':'}${process.env.PYTHONPATH}` : pythonPath })
+        ], cwd, { PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${process.platform === 'win32' ? ';' : ':'}${process.env.PYTHONPATH}` : pythonPath }, config.timeoutMs, config.killGraceMs)
         append(agent, { kind: 'available', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, notebook, html, inputs: inputsPath })
       } catch (error) {
         append(agent, { kind: 'failed', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, reason: error instanceof Error ? error.message : String(error) })
@@ -142,14 +166,30 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   ctx.on('tools/result', (exec) => {
     const agent = exec.agent
     if (agent === undefined || !config.triggerTools.includes(exec.name)) return
-    const event = [...agent.session.snapshotEvents()].reverse().find((candidate) => candidate.type === 'tool/result' && String((candidate.data as Record<string, unknown>).message ?? '').length >= 0)
-    const triggerSeq = event === undefined ? Number(agent.session.seq) - 1 : Number(event.seq)
-    void generate(agent, triggerSeq, `tool:${exec.name}`)
+    let calls = pending.get(agent)
+    if (calls === undefined) { calls = new Map(); pending.set(agent, calls) }
+    calls.set(String(exec.callId), { callId: String(exec.callId), tool: exec.name })
+  })
+
+  ctx.on('agent/created', ({ agent }) => {
+    agent.ctx.on('session/event', (session, event) => {
+      if (session !== agent.session) return
+      const calls = pending.get(agent)
+      if (calls === undefined) return
+      const terminal = matchTerminalResult(event, calls)
+      if (terminal === undefined) return
+      calls.delete(terminal.callId)
+      queueMicrotask(() => { void generate(agent, Number(event.seq), `tool:${terminal.tool}`) })
+    })
+    return undefined
   })
 
   if (config.triggerOnTurnStop) {
-    ctx.on('agent/turn-stopping', async ({ agent, turn }) => {
-      await generate(agent, Number(agent.session.seq), `turn:${turn}`)
+    ctx.on('agent/turn-stopping', ({ agent, turn }) => {
+      const key = turnTriggerKey(String(agent.id), turn, config.templateVersion)
+      if (turnScheduled.has(key)) return
+      turnScheduled.add(key)
+      queueMicrotask(() => { void generate(agent, Number(agent.session.seq), `turn:${turn}`).finally(() => turnScheduled.delete(key)) })
     })
   }
 }

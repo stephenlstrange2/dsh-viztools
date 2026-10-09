@@ -35,7 +35,7 @@ The 2026-10-09 architecture review found critical gaps in enforcement ordering, 
 
 - [x] Phase 1: monotonic fail-closed gate and enforced deployment baseline
 - [x] Phase 2: monotonic rules, replay-stable committed counters, stricter-deployment replay validation, fork policy
-- [ ] Phase 3: report only after matching durable terminal result; timeout/cancellation/coalescing
+- [x] Phase 3: report only after matching durable terminal result; timeout/cancellation/coalescing
 - [ ] Phase 4: stable locked placeholder/current-report app
 - [ ] Phase 5: durable run-id artifact resolution
 - [ ] Phase 6: token file, realpath containment, safe session directory identity, lock-content marker

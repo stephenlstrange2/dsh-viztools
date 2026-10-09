@@ -12,10 +12,6 @@ describe('OTX hardening release blockers', () => {
 
   it.todo('PTC plan flow can reach exit_plan_mode without opening non-planning tools')
 
-  it.todo('terminal report waits for matching durable tool/result before reading trajectory')
-  it.todo('terminal report matches modern tool-result content block by call id')
-  it.todo('hung report export times out, terminates, and does not block turn stopping')
-  it.todo('turn-stop report trigger coalesces instead of exporting every changing session seq')
   it.todo('fresh locked console serves plan-in-progress placeholder then active report')
   it.todo('run id extracted from durable start_run result resolves report artifacts')
 
