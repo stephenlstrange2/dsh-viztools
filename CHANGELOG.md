@@ -4,6 +4,13 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening baseline
+
+- Blocked v1 and locked-console promotion after architecture review found bypassable listener ordering, incomplete deployment-policy enforcement, replay-unstable counters, premature terminal reports, missing locked report publication, and runtime secret/path/privacy gaps.
+- Added representative OTX terminal-result, PTC, and gate fixtures.
+- Added named todo acceptance contracts for remediation Phases 1–8 while keeping the normal developer suite green.
+- Explicitly retained regression coverage for the modern `tool-result` content-block loader shape used by real OTX trajectories.
+
 ### Fixed
 
 - Load the sidebar Client through a dedicated `dsh-viztools-client-host` package boundary with matching module identity; the previous runtime-only entry never entered the Web boot graph, so automatic side-by-side opening could not run.

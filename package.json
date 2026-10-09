@@ -51,6 +51,7 @@
     "CHANGELOG.md",
     "THREAT_MODEL.md",
     "SECURITY_REVIEW.md",
+    "OTX_HARDENING.md",
     "LICENSE"
   ],
   "license": "MIT",
