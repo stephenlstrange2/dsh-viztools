@@ -25,6 +25,11 @@ describe('monotonic gate policy', () => {
     expect(() => expandPatterns(['r*'], ['replay_tx_only', 'read', 'run_code'], new Set(['replay_tx_only']))).toThrow(/deployment-denied/)
   })
 
+  it('marks delegation tools outside an OTX deployment as denied', () => {
+    expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {}, tool: 'subagent' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
+    expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {}, tool: 'subagent_fork' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
+  })
+
   it('stores safe wildcard expansion as canonical names', () => {
     expect(expandPatterns(['mcp__otx__*'], ['mcp__otx__diff', 'mcp__otx__replay'], new Set(['mcp__otx__diff', 'mcp__otx__replay']))).toEqual(['mcp__otx__diff', 'mcp__otx__replay'])
   })

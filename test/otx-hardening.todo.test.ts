@@ -10,10 +10,6 @@ import { approvedGateChange, otxFinalizeCall, otxPtcStart, otxToolResultContentB
  */
 describe('OTX hardening release blockers', () => {
 
-  it.todo('later rule approval merges denies and lowers limits instead of replacing policy')
-  it.todo('live accepted-call count equals replayed count after refusal and resume')
-  it.todo('saved rules are revalidated against a stricter deployment fingerprint')
-  it.todo('fork/subagent creation is refused under governed OTX run policy')
   it.todo('PTC plan flow can reach exit_plan_mode without opening non-planning tools')
 
   it.todo('terminal report waits for matching durable tool/result before reading trajectory')

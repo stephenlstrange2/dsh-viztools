@@ -4,6 +4,14 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 2
+
+- Versioned approved rules now merge monotonically: allow intersection, deny union, minimum limits, and deduplicated advisory notes.
+- Added durable `accepted-call` events so live and resumed limit counts use the same fold and refused calls do not consume limits.
+- Persisted a deployment-policy fingerprint and invalidate saved rules that cannot survive a stricter deployment.
+- Explicitly deny subagent, fork, and workflow delegation while approved OTX rules govern the session.
+- Reduced outstanding OTX blockers from 16 to 12.
+
 ### Security — OTX hardening Phase 1
 
 - Moved authoritative plan/run denial into `ToolRuntime.guard`, which remains monotonic after earlier `allow` or `ask` listeners.

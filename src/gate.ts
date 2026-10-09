@@ -7,7 +7,7 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { foldGate, GATE_EVENT_TYPE, type GateChange, type GateState } from './gate-domain.js'
 import { decideTool, expandPatterns } from './gate-policy.js'
-import { foldRunRules, RUN_RULES_EVENT, RUN_RULES_VERSION, toolAllowed, type RunRules, type RunRulesChange, type RunRulesState } from './run-rules.js'
+import { deploymentFingerprint, foldRunRules, mergeRules, rulesValidForDeployment, RUN_RULES_EVENT, RUN_RULES_VERSION, type RunRules, type RunRulesChange, type RunRulesState } from './run-rules.js'
 
 export { GATE_EVENT_TYPE, decodeGateChange, foldGate, initialGateState } from './gate-domain.js'
 export type { GateChange, GateState } from './gate-domain.js'
@@ -71,7 +71,6 @@ interface AgentGate {
   state: GateState
   rules: RunRulesState
   readonly refusedCallIds: Set<string>
-  readonly countedCallIds: Set<string>
   readonly pendingDenials: Map<string, { code: string; reason: string; count?: number; limit?: number }>
 }
 
@@ -115,7 +114,7 @@ function validateRules(rules: RunRules, config: ResolvedConfig['runRules'], regi
     if (cap === undefined) throw new Error(`rule limit names unsupported tool: ${tool}`)
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > cap) throw new Error(`rule limit for ${tool} must be between 1 and ${cap}`)
   }
-  return { ...rules, allow, deny }
+  return { ...rules, allow, deny, deploymentFingerprint: deploymentFingerprint(config.allowedTools, config.maxLimits) }
 }
 
 /** Install the durable plan-first enforcement gate. */
@@ -149,7 +148,7 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
           if (typeof value !== 'number') throw new Error(`run rule limit for ${tool} must be numeric`)
           limits[tool] = value
         }
-        const proposed: RunRules = { version: RUN_RULES_VERSION, allow: args.allow, deny: args.deny, limits, notes: args.notes }
+        const proposed: RunRules = { version: RUN_RULES_VERSION, allow: args.allow, deny: args.deny, limits, notes: args.notes, deploymentFingerprint: deploymentFingerprint(config.runRules.allowedTools, config.runRules.maxLimits) }
         const rules = validateRules(proposed, config.runRules, agent.ctx.tools.schemas().map((schema) => schema.name))
         const answer = await ctx.userQuestions.ask({
           questions: [{
@@ -164,9 +163,9 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
         })
         const item = answer.answers.find((entry) => entry.id === 'run-rules-review')
         if (item?.selected.length !== 1 || item.selected[0] !== 'Approve' || item.custom !== undefined) throw new Error('The user rejected the proposed run rules.')
-        appendRules(agent, { kind: 'approved', version: 1, callId: String(exec.callId), rules })
+        appendRules(agent, { kind: 'approved', version: RUN_RULES_VERSION, callId: String(exec.callId), rules })
         const gate = gates.get(agent)
-        if (gate !== undefined) gate.rules = { ...gate.rules, rules, approvedAtSeq: Number(agent.session.seq) - 1 }
+        if (gate !== undefined) gate.rules = { ...gate.rules, rules: mergeRules(gate.rules.rules, rules), approvedAtSeq: Number(agent.session.seq) - 1 }
         return { approved: true }
       },
     }))
@@ -175,8 +174,12 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
   ctx.on('agent/created', ({ agent }) => {
     const events = agent.session.snapshotEvents()
     const state = foldGate(events)
-    const rules = foldRunRules(events)
-    gates.set(agent, { state, rules, refusedCallIds: new Set(), countedCallIds: new Set(), pendingDenials: new Map() })
+    let rules = foldRunRules(events)
+    if (rules.rules !== undefined && !rulesValidForDeployment(rules.rules, deploymentAllowed, config.runRules.maxLimits)) {
+      const { rules: _invalidRules, approvedAtSeq: _approvedAtSeq, ...safeState } = rules
+      rules = safeState
+    }
+    gates.set(agent, { state, rules, refusedCallIds: new Set(), pendingDenials: new Map() })
     agent.ctx.effect(() => agent.ctx.systemPrompt.section({
       name: 'viztools:run-rules-notes',
       order: 700,
@@ -196,6 +199,12 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
     if (missing.length > 0) throw new Error(`planFirst.planningTools are not visible to agent ${String(agent.id)}: ${missing.join(', ')}`)
     agent.ctx.effect(() => agent.ctx.tools.guard((exec) => {
       const current = exec.agent === undefined ? undefined : gates.get(exec.agent)
+      const governedDelegation = current?.rules.rules !== undefined && (exec.name === 'subagent' || exec.name === 'subagent_fork' || exec.name === 'workflow')
+      if (governedDelegation) {
+        const reason = 'Forks, subagents, and workflows are disabled while approved OTX run rules govern this session.'
+        current?.pendingDenials.set(String(exec.callId), { code: 'RUN_RULE_DENIED', reason })
+        return reason
+      }
       const denial = decideTool({
         knownAgent: current !== undefined,
         planApproved: current?.state.approved ?? false,
@@ -220,7 +229,7 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
           gate.state = { ...gate.state, refusals: gate.state.refusals + 1 }
         } else {
           const kind = denial.code === 'RUN_RULE_LIMIT' ? 'limit-reached' : 'refused-call'
-          appendRules(agent, { kind, version: 1, callId: String(exec.callId), tool: exec.name, reason: denial.reason, ...(denial.count === undefined ? {} : { count: denial.count }), ...(denial.limit === undefined ? {} : { limit: denial.limit }) })
+          appendRules(agent, { kind, version: RUN_RULES_VERSION, callId: String(exec.callId), tool: exec.name, reason: denial.reason, ...(denial.count === undefined ? {} : { count: denial.count }), ...(denial.limit === undefined ? {} : { limit: denial.limit }) })
         }
       }
       return next()
@@ -230,6 +239,13 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
 
   ctx.on('tools/result', (exec, result) => {
     const agent = exec.agent
+    if (agent !== undefined && !result.isError) {
+      const gate = gates.get(agent)
+      if (gate?.rules.rules !== undefined && !gate.rules.acceptedCallIds.has(String(exec.callId))) {
+        appendRules(agent, { kind: 'accepted-call', version: RUN_RULES_VERSION, callId: String(exec.callId), tool: exec.name })
+        gate.rules = foldRunRules(agent.session.snapshotEvents())
+      }
+    }
     if (agent === undefined || exec.name !== EXIT_PLAN_MODE || result.isError) return
     const value = result.value
     if (typeof value !== 'object' || value === null || Array.isArray(value) || (value as Record<string, unknown>).approved !== true) return

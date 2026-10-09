@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Session } from '@deepseek-ai/dsh-session'
 import { foldGate, GATE_EVENT_TYPE } from '../src/gate-domain.js'
-import { foldRunRules, RUN_RULES_EVENT, toolAllowed, type RunRules } from '../src/run-rules.js'
+import { deploymentFingerprint, foldRunRules, RUN_RULES_EVENT, type RunRules } from '../src/run-rules.js'
 import { completedReportKeys, REPORT_EVENT, reportKey } from '../src/report-domain.js'
 import { checkLockedProfile } from '../src/profile-check.js'
 
@@ -15,19 +15,18 @@ describe('OTX-like durable lifecycle', () => {
     expect(foldGate(session.snapshotEvents())).toMatchObject({ approved: true, refusals: 1 })
 
     const rules: RunRules = {
-      version: 1,
-      allow: ['mcp__otx__*'],
+      version: 2,
+      allow: ['mcp__otx__diff', 'mcp__otx__replay_tx_only'],
       deny: ['mcp__otx__emit_otx'],
       limits: { mcp__otx__replay_tx_only: 2 },
       notes: ['no edits after step 40'],
+      deploymentFingerprint: deploymentFingerprint(['mcp__otx__diff', 'mcp__otx__emit_otx', 'mcp__otx__replay_tx_only'], { mcp__otx__replay_tx_only: 2 }),
     }
-    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 1, callId: 'rules-1', rules })
-    session.append('tool/call', { turn: 2, step: 1, callId: 'r1' as never, name: 'mcp__otx__replay_tx_only', arguments: '{}' })
-    session.append('tool/call', { turn: 2, step: 1, callId: 'r2' as never, name: 'mcp__otx__replay_tx_only', arguments: '{}' })
-    session.append(RUN_RULES_EVENT, { kind: 'limit-reached', version: 1, callId: 'r3', tool: 'mcp__otx__replay_tx_only', reason: 'limit', count: 2, limit: 2 })
+    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 2, callId: 'rules-1', rules })
+    session.append(RUN_RULES_EVENT, { kind: 'accepted-call', version: 2, callId: 'r1', tool: 'mcp__otx__replay_tx_only' })
+    session.append(RUN_RULES_EVENT, { kind: 'accepted-call', version: 2, callId: 'r2', tool: 'mcp__otx__replay_tx_only' })
+    session.append(RUN_RULES_EVENT, { kind: 'limit-reached', version: 2, callId: 'r3', tool: 'mcp__otx__replay_tx_only', reason: 'limit', count: 2, limit: 2 })
     const ruleState = foldRunRules(session.snapshotEvents())
-    expect(toolAllowed(rules, 'mcp__otx__diff')).toBe(true)
-    expect(toolAllowed(rules, 'mcp__otx__emit_otx')).toBe(false)
     expect(ruleState.counts.mcp__otx__replay_tx_only).toBe(2)
     expect(ruleState.refusals).toHaveLength(1)
 

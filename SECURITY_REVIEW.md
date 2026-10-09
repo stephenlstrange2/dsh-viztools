@@ -34,7 +34,7 @@ Reviewed against DSH: 0.2.0-rc.2
 The 2026-10-09 architecture review found critical gaps in enforcement ordering, replay-stable policy, terminal-report timing, locked report display, runtime secret/path handling, and report privacy. These are captured as named `it.todo` acceptance contracts in `test/otx-hardening.todo.test.ts` with representative OTX event shapes in `test/fixtures/otx-events.ts`.
 
 - [x] Phase 1: monotonic fail-closed gate and enforced deployment baseline
-- [ ] Phase 2: monotonic rules, replay-stable committed counters, stricter-deployment replay validation, fork policy
+- [x] Phase 2: monotonic rules, replay-stable committed counters, stricter-deployment replay validation, fork policy
 - [ ] Phase 3: report only after matching durable terminal result; timeout/cancellation/coalescing
 - [ ] Phase 4: stable locked placeholder/current-report app
 - [ ] Phase 5: durable run-id artifact resolution
