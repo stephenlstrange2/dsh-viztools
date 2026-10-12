@@ -4,6 +4,14 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 7
+
+- The bundled report no longer exports raw tool arguments.
+- Known tools expose only allowlisted fields; secret-like keys and tokenized URL values are redacted.
+- Unknown tools expose only argument byte size and SHA-256, and oversized strings/objects become bounded omission markers.
+- A real static export was scanned to confirm access-token strings were absent.
+- Reduced outstanding OTX blockers from 2 to 1.
+
 ### Security — OTX hardening Phase 6
 
 - Marimo authentication now uses a mode-0600 token file; the secret no longer appears in process argv and is removed on child exit or runtime stop.

@@ -13,7 +13,6 @@ describe('OTX hardening release blockers', () => {
   it.todo('PTC plan flow can reach exit_plan_mode without opening non-planning tools')
 
 
-  it.todo('default report redacts tokenized URLs and bounds large tool arguments')
 
   it('keeps realistic modern DSH and PTC fixture shapes', () => {
     expect(otxToolResultContentBlock.data.message.content[0].isError).toBe(false)

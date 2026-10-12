@@ -39,7 +39,7 @@ The 2026-10-09 architecture review found critical gaps in enforcement ordering, 
 - [x] Phase 4: stable locked placeholder/current-report app
 - [x] Phase 5: durable run-id artifact resolution
 - [x] Phase 6: token file, realpath containment, safe session directory identity, lock-content marker
-- [ ] Phase 7: default report argument redaction/bounds
+- [x] Phase 7: default report argument redaction/bounds
 - [ ] Phase 8: real ToolRuntime/Agent-loop OTX acceptance suite
 
 The existing content-block loader branch is explicitly retained: real OTX trajectories predominantly encode tool results through `message.source.callId` and `tool-result` content blocks.

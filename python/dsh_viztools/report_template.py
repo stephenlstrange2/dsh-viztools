@@ -12,9 +12,10 @@ def _():
     from pathlib import Path
     import marimo as mo
     from dsh_viztools.session import load_session
+    from dsh_viztools.privacy import safe_tool_rows
     inputs = json.loads(Path(__file__).with_name("inputs.json").read_text(encoding="utf-8"))
     run = load_session(inputs["trajectory"])
-    return inputs, mo, run
+    return inputs, mo, run, safe_tool_rows
 
 
 @app.cell
@@ -36,9 +37,9 @@ def _(inputs, mo, run):
 
 
 @app.cell
-def _(mo, run):
-    mo.md("## Tool calls\nDurable calls paired with their recorded outcomes.")
-    mo.ui.table(run.tool_calls, pagination=True, page_size=20, selection=None)
+def _(mo, run, safe_tool_rows):
+    mo.md("## Tool calls\nArguments are allowlisted, redacted, and bounded by the default privacy policy.")
+    mo.ui.table(safe_tool_rows(run.tool_calls), pagination=True, page_size=20, selection=None)
     return
 
 

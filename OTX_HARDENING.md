@@ -12,7 +12,7 @@ Phase 0 freezes the 2026-10-09 review findings as 22 named acceptance contracts 
 4. Stable locked placeholder/current-report app — **complete 2026-10-09**
 5. Durable run-id input resolution — **complete 2026-10-09**
 6. Token file, realpath containment, safe session paths, lock-content marker — **complete 2026-10-12**
-7. Default report argument redaction and bounds
+7. Default report argument redaction and bounds — **complete 2026-10-12**
 8. Real ToolRuntime/Agent-loop OTX acceptance suite
 
 Complete exactly one phase at a time. Convert its todo tests into active assertions, make them green, update `SECURITY_REVIEW.md`, and stop for review with a commit message.
@@ -20,7 +20,8 @@ Complete exactly one phase at a time. Convert its todo tests into active asserti
 ## Baseline evidence
 
 ```text
-68 passed | 2 todo
+69 passed | 1 todo
+13 Python tests passed
 9 Python tests passed
 ```
 
