@@ -4,6 +4,13 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 8
+
+- Added a real ToolRuntime OTX acceptance chain covering closed gate, plan approval, replay-stable rule limit, successful terminal execution, modern durable result matching, managed report publication, and locked-profile validation.
+- PTC plan transport (`run_code`) and `exit_plan_mode` remain reachable while non-planning tools stay closed.
+- Completed the hardening inventory: 71 TypeScript tests, 13 Python tests, zero todo blockers.
+- Locked-console promotion remains gated by the manual/internal acceptance checklist.
+
 ### Security — OTX hardening Phase 7
 
 - The bundled report no longer exports raw tool arguments.

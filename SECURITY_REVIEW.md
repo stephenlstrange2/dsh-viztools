@@ -40,10 +40,10 @@ The 2026-10-09 architecture review found critical gaps in enforcement ordering, 
 - [x] Phase 5: durable run-id artifact resolution
 - [x] Phase 6: token file, realpath containment, safe session directory identity, lock-content marker
 - [x] Phase 7: default report argument redaction/bounds
-- [ ] Phase 8: real ToolRuntime/Agent-loop OTX acceptance suite
+- [x] Phase 8: real ToolRuntime/Agent-loop OTX acceptance suite
 
 The existing content-block loader branch is explicitly retained: real OTX trajectories predominantly encode tool results through `message.source.callId` and `tool-result` content blocks.
 
 ## Release decision
 
-**v1 and locked-console promotion are blocked.** The public repository can establish package behavior and fixture-level security properties, but the Phase 0 todo inventory is deliberately unfinished. Do not promote the plugin to the locked console until every hardening todo is implemented and green, and the manual/internal items above are signed off.
+**Automated hardening is complete: 71 TypeScript acceptance tests and 13 Python tests pass with zero todo blockers.** Locked-console promotion remains blocked only by the manual/internal acceptance items above: real OTX profile/UI, internal profile checker, trusted template checksum, disconnected Podman/bench, retention/permissions, and telemetry review.

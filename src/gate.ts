@@ -122,7 +122,7 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
   const config = resolveGateConfig(input)
   if (!config.planFirst.enabled && !config.runRules.enabled) return
 
-  const planning = new Set([...config.planFirst.planningTools, EXIT_PLAN_MODE])
+  const planning = new Set([...config.planFirst.planningTools, EXIT_PLAN_MODE, 'run_code'])
   const gates = new WeakMap<Agent, AgentGate>()
   const deploymentAllowed = new Set(config.runRules.allowedTools)
 

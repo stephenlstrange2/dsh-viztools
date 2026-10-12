@@ -10,7 +10,15 @@ import { approvedGateChange, otxFinalizeCall, otxPtcStart, otxToolResultContentB
  */
 describe('OTX hardening release blockers', () => {
 
-  it.todo('PTC plan flow can reach exit_plan_mode without opening non-planning tools')
+  it('PTC plan transport can run while non-planning tools stay closed', async () => {
+    const { decideTool } = await import('../src/gate-policy.js')
+    const planning = new Set(['run_code', 'exit_plan_mode', 'bench_status'])
+    const allowed = new Set(['run_code', 'exit_plan_mode', 'bench_status', 'emit_otx'])
+    const base = { knownAgent: true, planApproved: false, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {} }
+    expect(decideTool({ ...base, tool: 'run_code' })).toBeUndefined()
+    expect(decideTool({ ...base, tool: 'exit_plan_mode' })).toBeUndefined()
+    expect(decideTool({ ...base, tool: 'emit_otx' })?.code).toBe('PLAN_NOT_APPROVED')
+  })
 
 
 
