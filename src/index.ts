@@ -7,6 +7,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Config, type ResolvedConfig } from './config.js'
 import { MarimoRuntime } from './runtime.js'
+import { isSafeSessionId, reportRouteUrl } from './managed-state.js'
 
 export { Config }
 export type { Config as DshViztoolsConfig, ResolvedConfig } from './config.js'
@@ -103,7 +104,11 @@ export async function apply(ctx: Context, config: ResolvedConfig): Promise<void>
     fetch: async (request) => {
       const sessionId = new URL(request.url).searchParams.get('session')
       const browserUrl = new URL(runtime.status().browserUrl)
-      if (sessionId !== null) browserUrl.searchParams.set('session', sessionId)
+      if (sessionId !== null && isSafeSessionId(sessionId)) {
+        browserUrl.searchParams.set('session', sessionId)
+        // Absolute authenticated DSH URL for "open report"; the marimo viewer has a different origin.
+        browserUrl.searchParams.set('report_url', new URL(reportRouteUrl(sessionId), request.url).href)
+      }
       return Response.json({
       browserUrl: browserUrl.href,
       notebook: runtime.status().notebook,

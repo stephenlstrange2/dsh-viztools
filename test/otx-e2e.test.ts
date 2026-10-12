@@ -15,17 +15,17 @@ describe('OTX-like durable lifecycle', () => {
     expect(foldGate(session.snapshotEvents())).toMatchObject({ approved: true, refusals: 1 })
 
     const rules: RunRules = {
-      version: 2,
+      version: 3,
       allow: ['mcp__otx__diff', 'mcp__otx__replay_tx_only'],
       deny: ['mcp__otx__emit_otx'],
       limits: { mcp__otx__replay_tx_only: 2 },
       notes: ['no edits after step 40'],
       deploymentFingerprint: deploymentFingerprint(['mcp__otx__diff', 'mcp__otx__emit_otx', 'mcp__otx__replay_tx_only'], { mcp__otx__replay_tx_only: 2 }),
     }
-    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 2, callId: 'rules-1', rules })
-    session.append(RUN_RULES_EVENT, { kind: 'accepted-call', version: 2, callId: 'r1', tool: 'mcp__otx__replay_tx_only' })
-    session.append(RUN_RULES_EVENT, { kind: 'accepted-call', version: 2, callId: 'r2', tool: 'mcp__otx__replay_tx_only' })
-    session.append(RUN_RULES_EVENT, { kind: 'limit-reached', version: 2, callId: 'r3', tool: 'mcp__otx__replay_tx_only', reason: 'limit', count: 2, limit: 2 })
+    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 3, callId: 'rules-1', rules })
+    session.append(RUN_RULES_EVENT, { kind: 'started-call', version: 3, callId: 'r1', tool: 'mcp__otx__replay_tx_only' })
+    session.append(RUN_RULES_EVENT, { kind: 'started-call', version: 3, callId: 'r2', tool: 'mcp__otx__replay_tx_only' })
+    session.append(RUN_RULES_EVENT, { kind: 'limit-reached', version: 3, callId: 'r3', tool: 'mcp__otx__replay_tx_only', reason: 'limit', count: 2, limit: 2 })
     const ruleState = foldRunRules(session.snapshotEvents())
     expect(ruleState.counts.mcp__otx__replay_tx_only).toBe(2)
     expect(ruleState.refusals).toHaveLength(1)

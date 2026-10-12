@@ -30,6 +30,30 @@ describe('monotonic gate policy', () => {
     expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {}, tool: 'subagent_fork' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
   })
 
+  it('plan-first only: approval opens every tool with no deployment allowlist', () => {
+    const base = { knownAgent: true, planFirst: true, planningTools: planning, deploymentRestricted: false, deploymentAllowed: new Set<string>(), deploymentLimits: {}, counts: {}, denialMessage: 'Submit a plan first.' }
+    expect(decideTool({ ...base, planApproved: false, tool: 'bash' })).toEqual({ code: 'PLAN_NOT_APPROVED', reason: 'Submit a plan first.' })
+    expect(decideTool({ ...base, planApproved: true, tool: 'bash' })).toBeUndefined()
+  })
+
+  it('run-rules only: no plan approval is required, deployment ceiling applies', () => {
+    const base = { knownAgent: true, planFirst: false, planApproved: false, planningTools: new Set<string>(), deploymentAllowed: allowed, deploymentLimits: {}, counts: {} }
+    expect(decideTool({ ...base, tool: 'diff' })).toBeUndefined()
+    expect(decideTool({ ...base, tool: 'bash' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
+  })
+
+  it('always allows gate control tools, including before approval', () => {
+    const control = new Set(['exit_plan_mode', 'propose_run_rules', 'run_code'])
+    for (const tool of control) {
+      expect(decideTool({ knownAgent: true, planFirst: true, planApproved: false, planningTools: new Set(), controlTools: control, deploymentAllowed: new Set(), deploymentLimits: {}, counts: {}, tool })).toBeUndefined()
+    }
+  })
+
+  it('keeps planning tools under the deployment ceiling and session rules after approval', () => {
+    const rules = { version: 3 as const, deny: ['bench_status'], limits: {}, notes: [], deploymentFingerprint: 'x' }
+    expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, rules, counts: {}, tool: 'bench_status' })?.code).toBe('RUN_RULE_DENIED')
+  })
+
   it('stores safe wildcard expansion as canonical names', () => {
     expect(expandPatterns(['mcp__otx__*'], ['mcp__otx__diff', 'mcp__otx__replay'], new Set(['mcp__otx__diff', 'mcp__otx__replay']))).toEqual(['mcp__otx__diff', 'mcp__otx__replay'])
   })

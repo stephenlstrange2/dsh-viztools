@@ -124,7 +124,8 @@
     "wheelhouse": "node scripts/build-wheelhouse.mjs",
     "verify:release": "node scripts/verify-release.mjs --dsh 0.2.0-rc.2",
     "test": "vitest run && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=python python3 -m unittest discover -s test -p 'test_*.py'",
-    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm test:client-bundle"
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm test:client-bundle",
+    "test:integration": "pnpm build && node scripts/integration-otx-console.mjs"
   },
   "packageManager": "pnpm@12.3.4"
 }

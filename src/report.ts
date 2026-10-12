@@ -9,7 +9,9 @@ import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeys, reportKey, REPORT_EVENT, type ReportChange } from './report-domain.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
-import { publishManagedState } from './managed-state.js'
+import { isSafeSessionId, publishManagedState, readManagedState, REPORT_ROUTE, reportRouteUrl } from './managed-state.js'
+import { serveReport } from './report-route.js'
+import type {} from '@deepseek-ai/dsh-client-connection'
 import { containedRealpath, extractDynamicInputs, substitutePlaceholders, type DynamicInputSpec } from './dynamic-inputs.js'
 
 export { completedReportKeys, reportKey, REPORT_EVENT } from './report-domain.js'
@@ -98,7 +100,7 @@ async function containedExistingPath(root: string, value: string, label: string)
 }
 
 function safeSessionId(value: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error(`invalid report session id: ${value}`)
+  if (!isSafeSessionId(value)) throw new Error(`invalid report session id: ${value}`)
   return value
 }
 
@@ -121,11 +123,16 @@ export async function runReportCommand(executable: string, args: string[], cwd: 
     timeout.unref()
     child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk))
     child.once('error', (error) => { clearTimeout(timeout); if (killTimer !== undefined) clearTimeout(killTimer); reject(error) })
-    child.once('exit', (code) => {
+    // A timed-out export settles on 'exit' (grandchildren may hold the pipes open);
+    // otherwise wait for 'close' so the captured stderr is complete.
+    child.once('exit', () => {
       clearTimeout(timeout)
       if (killTimer !== undefined) clearTimeout(killTimer)
       if (timedOut) reject(new Error(`report export timed out after ${timeoutMs}ms`))
-      else if (code === 0) resolvePromise()
+    })
+    child.once('close', (code) => {
+      if (timedOut) return
+      if (code === 0) resolvePromise()
       else reject(new Error(Buffer.concat(stderr).toString('utf8').trim() || `report export exited ${code}`))
     })
   })
@@ -150,13 +157,27 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const outputRoot = safePath(cwd, config.outputDir, 'report outputDir')
   const environmentDir = safePath(cwd, config.environmentDir, 'report environmentDir')
   const templatePromise = config.template === '' ? realpath(DEFAULT_TEMPLATE) : containedExistingPath(cwd, config.template, 'report template')
+  // Observed here so a bad template path fails each report (recorded as `failed`) instead of
+  // surfacing as an unhandled rejection that would terminate the host.
+  templatePromise.catch(() => undefined)
   const inFlight = new Map<string, Promise<void>>()
   const pending = new WeakMap<Agent, Map<string, PendingTerminalTrigger>>()
   const turnScheduled = new Set<string>()
+  const report = (message: string, error: unknown): void => {
+    const detail = error instanceof Error ? error.message : String(error)
+    const logger = (ctx as unknown as { logger?: { warn?: (text: string) => void } }).logger
+    if (typeof logger?.warn === 'function') logger.warn(`${message}: ${detail}`)
+    else console.warn(`dsh-viztools-report: ${message}: ${detail}`)
+  }
 
   const generate = (agent: Agent, triggerSeq: number, trigger: string): Promise<void> => {
     const key = reportKey(String(agent.id), triggerSeq, config.templateVersion)
-    if (completedReportKeys(agent.session.snapshotEvents(), String(agent.id)).has(key)) return Promise.resolve()
+    try {
+      if (completedReportKeys(agent.session.snapshotEvents(), String(agent.id)).has(key)) return Promise.resolve()
+    } catch (error) {
+      report(`could not read report history for ${String(agent.id)}`, error)
+      return Promise.resolve()
+    }
     const existing = inFlight.get(key)
     if (existing !== undefined) return existing
     const work = (async () => {
@@ -182,20 +203,40 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
         await runReportCommand(python(environmentDir), [
           '-m', 'marimo', 'export', 'html', notebook, '--force', config.includeCode ? '--include-code' : '--no-include-code', '-o', html,
         ], cwd, { PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${process.platform === 'win32' ? ';' : ':'}${process.env.PYTHONPATH}` : pythonPath }, config.timeoutMs, config.killGraceMs)
-        await publishManagedState(outputRoot, { status: 'available', sessionId, html, updatedAt: Date.now() })
+        await publishManagedState(outputRoot, { status: 'available', sessionId, html, url: reportRouteUrl(sessionId), updatedAt: Date.now() })
         append(agent, { kind: 'available', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, notebook, html, inputs: inputsPath })
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
         await publishManagedState(outputRoot, { status: 'failed', sessionId, reason, updatedAt: Date.now() })
         append(agent, { kind: 'failed', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, reason })
       }
-    })().finally(() => inFlight.delete(key))
+    })().catch((error: unknown) => {
+      // Last-resort containment: report generation must never crash the host process.
+      report(`report generation for ${String(agent.id)} could not be recorded`, error)
+    }).finally(() => inFlight.delete(key))
     inFlight.set(key, work)
     return work
   }
 
+  // Serve finished exports on the authenticated DSH origin whenever the web connection exists.
+  // This lives with the report plugin (not the marimo runtime) so reports stay reachable even
+  // if marimo is disabled or fails to start.
+  ctx.inject(['connection'], (web) => {
+    web.effect(() => web.connection.fetch.register({
+      path: REPORT_ROUTE,
+      methods: ['GET', 'HEAD'],
+      requestBody: 'buffered',
+      fetch: (request) => serveReport(outputRoot, request),
+    }), 'dsh-viztools.report-route')
+  })
+
   ctx.on('agent/created', ({ agent }) => {
-    void publishManagedState(outputRoot, { status: 'pending', sessionId: String(agent.id), updatedAt: Date.now() })
+    const sessionId = String(agent.id)
+    if (!isSafeSessionId(sessionId)) return undefined
+    // On resume a finished report (available or failed) must survive; only seed missing state.
+    void readManagedState(outputRoot, sessionId)
+      .then((existing) => existing === undefined ? publishManagedState(outputRoot, { status: 'pending', sessionId, updatedAt: Date.now() }) : undefined)
+      .catch((error: unknown) => report(`could not publish pending report state for ${sessionId}`, error))
     return undefined
   })
 

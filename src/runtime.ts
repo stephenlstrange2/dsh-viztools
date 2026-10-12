@@ -57,7 +57,8 @@ async function run(command: string, args: readonly string[], cwd: string, timeou
       clearTimeout(timer)
       reject(error)
     })
-    child.once('exit', (code, signal) => {
+    // 'close' (not 'exit') so captured stdout/stderr are complete.
+    child.once('close', (code, signal) => {
       clearTimeout(timer)
       if (code === 0) resolvePromise()
       else reject(new Error(`${command} exited with ${code ?? signal}: ${Buffer.concat(stderr).toString('utf8').trim() || Buffer.concat(stdout).toString('utf8').trim()}`))
@@ -162,17 +163,29 @@ export class MarimoRuntime {
   async start(): Promise<RuntimeStatus> {
     if (this.current !== undefined) return this.current
     await this.prepareEnvironment()
-    await mkdir(dirname(this.notebook), { recursive: true })
-    try {
-      await readFile(this.notebook, 'utf8')
-    } catch {
-      if (this.config.mode === 'managed-readonly') throw new Error(`bundled managed report app is missing: ${this.notebook}`)
-      await writeFile(this.notebook, NOTEBOOK_TEMPLATE, 'utf8')
+    if (this.config.mode === 'managed-readonly') {
+      // The locked viewer is the plugin-owned app shipped inside the package, not a
+      // workspace notebook, so workspace containment does not apply. Pin it to the
+      // real package location instead so a symlinked or swapped path cannot be served.
+      try {
+        await readFile(this.notebook, 'utf8')
+      } catch {
+        throw new Error(`bundled managed report app is missing: ${this.notebook}`)
+      }
+      const packageApps = await realpath(join(PACKAGE_ROOT, 'python', 'dsh_viztools'))
+      if (await realpath(this.notebook) !== join(packageApps, 'managed_report_app.py')) throw new Error('bundled managed report app resolves outside the plugin package')
+      await mkdir(this.managedReportRoot, { recursive: true })
+    } else {
+      await mkdir(dirname(this.notebook), { recursive: true })
+      try {
+        await readFile(this.notebook, 'utf8')
+      } catch {
+        await writeFile(this.notebook, NOTEBOOK_TEMPLATE, 'utf8')
+      }
+      const root = await realpath(this.cwd)
+      const notebookParent = await realpath(dirname(this.notebook))
+      if (!within(root, notebookParent)) throw new Error('notebook parent resolves outside the workspace')
     }
-
-    const root = await realpath(this.cwd)
-    const notebookParent = await realpath(dirname(this.notebook))
-    if (!within(root, notebookParent)) throw new Error('notebook parent resolves outside the workspace')
 
     const port = await freePort()
     const token = randomBytes(32).toString('base64url')

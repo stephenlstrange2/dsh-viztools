@@ -233,6 +233,37 @@ class PlanExplanation:
         return pl.DataFrame(tables[table])
 
 
+def _decode_rules(rules: dict[str, Any], version: Any) -> dict[str, Any]:
+    """Normalize one approved rule set; version 2 encoded "no allowlist" as ``allow: []``."""
+    decoded = {
+        "deny": list(rules.get("deny", [])),
+        "limits": dict(rules.get("limits", {})),
+        "notes": list(rules.get("notes", [])),
+    }
+    allow = rules.get("allow")
+    if isinstance(allow, list) and not (version == 2 and len(allow) == 0):
+        decoded["allow"] = list(allow)
+    return decoded
+
+
+def _merge_rules(previous: dict[str, Any] | None, proposed: dict[str, Any]) -> dict[str, Any]:
+    """Mirror the gate: successive approvals only narrow (intersect allow, union deny, min limits)."""
+    if previous is None:
+        return proposed
+    merged: dict[str, Any] = {
+        "deny": sorted(set(previous["deny"]) | set(proposed["deny"])),
+        "limits": dict(previous["limits"]),
+        "notes": list(dict.fromkeys([*previous["notes"], *proposed["notes"]])),
+    }
+    for tool, limit in proposed["limits"].items():
+        merged["limits"][tool] = min(limit, merged["limits"].get(tool, limit))
+    if "allow" in previous and "allow" in proposed:
+        merged["allow"] = sorted(set(previous["allow"]) & set(proposed["allow"]))
+    elif "allow" in previous or "allow" in proposed:
+        merged["allow"] = sorted(previous.get("allow", proposed.get("allow", [])))
+    return merged
+
+
 def _title(markdown: str, fallback: str) -> str:
     return next(
         (match.group(2) for line in markdown.strip().splitlines() if (match := _HEADING.match(line))),
@@ -348,11 +379,16 @@ def explain_plan(
             continue
         change = event["data"]
         if change.get("kind") == "approved" and isinstance(change.get("rules"), dict):
-            approved_rules = change["rules"]
+            approved_rules = _merge_rules(approved_rules, _decode_rules(change["rules"], change.get("version")))
         elif change.get("kind") in {"refused-call", "limit-reached"}:
             rule_refusals.append(change)
     rules_table: list[dict[str, Any]] = []
     if approved_rules is not None:
+        allow = approved_rules.get("allow")
+        if allow is not None:
+            refused = sum(item.get("kind") == "refused-call" and item.get("tool") not in allow and item.get("tool") not in approved_rules.get("deny", []) for item in rule_refusals)
+            label = f"allow only {', '.join(allow)}" if allow else "allow nothing (empty allowlist)"
+            rules_table.append({"rule": label, "enforcement": "enforced", "observed_calls": sum(row["tool_name"] in allow for row in calls), "refused_calls": refused})
         for pattern in approved_rules.get("deny", []):
             refused = sum(item.get("tool") == pattern or (str(pattern).endswith("*") and str(item.get("tool", "")).startswith(str(pattern)[:-1])) for item in rule_refusals)
             observed = sum(row["tool_name"] == pattern or (str(pattern).endswith("*") and row["tool_name"].startswith(str(pattern)[:-1])) for row in calls)

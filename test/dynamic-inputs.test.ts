@@ -19,6 +19,15 @@ describe('dynamic report inputs', () => {
     expect(() => substitutePlaceholders('runs/{missing}', {})).toThrow(/missing/)
   })
 
+  it('rejects placeholder values that are not one safe path segment, even if the pattern allowed them', () => {
+    for (const value of ['../escape', 'a/b', '..', '.hidden', 'a..b', 'a\\b', '', 'x'.repeat(200)]) {
+      expect(() => substitutePlaceholders('runs/{runId}/audit.jsonl', { runId: value })).toThrow(/safe path segment/)
+    }
+    const permissive = [{ ...(events as unknown as unknown[])[0] as object }, { ...(events as unknown as Record<string, unknown>[])[1], data: { turn: 1, step: 1, message: { source: { kind: 'tool', callId: 'start-1' }, content: [{ type: 'tool-result', toolCallId: 'start-1', isError: false, content: [{ type: 'text', text: '{"run_id":"../../etc"}' }] }] } } }] as never
+    const dynamic = extractDynamicInputs(permissive, { runId: { tool: 'mcp__otx__start_run', field: 'run_id', pattern: '.*' } })
+    expect(() => substitutePlaceholders('runs/{runId}/audit.jsonl', dynamic)).toThrow(/safe path segment/)
+  })
+
   it('rejects invalid extracted identifiers', () => {
     expect(() => extractDynamicInputs(events, { runId: { tool: 'mcp__otx__start_run', field: 'run_id', pattern: '^safe$' } })).toThrow(/failed validation/)
   })

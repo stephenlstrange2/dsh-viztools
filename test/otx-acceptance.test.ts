@@ -29,9 +29,9 @@ describe('OTX acceptance chain', () => {
     session.append(GATE_EVENT_TYPE, { kind: 'approved', version: 1, planCallId: 'plan' })
     expect(foldGate(session.snapshotEvents()).approved).toBe(true)
 
-    const rules: RunRules = { version: 2, allow: ['mcp__otx__replay_tx_only', 'mcp__otx__finalize_run'], deny: [], limits: { mcp__otx__replay_tx_only: 1 }, notes: [], deploymentFingerprint: deploymentFingerprint([...deploymentAllowed], { mcp__otx__replay_tx_only: 1 }) }
-    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 2, callId: 'rules', rules })
-    session.append(RUN_RULES_EVENT, { kind: 'accepted-call', version: 2, callId: 'replay-1', tool: 'mcp__otx__replay_tx_only' })
+    const rules: RunRules = { version: 3, allow: ['mcp__otx__replay_tx_only', 'mcp__otx__finalize_run'], deny: [], limits: { mcp__otx__replay_tx_only: 1 }, notes: [], deploymentFingerprint: deploymentFingerprint([...deploymentAllowed], { mcp__otx__replay_tx_only: 1 }) }
+    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 3, callId: 'rules', rules })
+    session.append(RUN_RULES_EVENT, { kind: 'started-call', version: 3, callId: 'replay-1', tool: 'mcp__otx__replay_tx_only' })
     const replayed = foldRunRules(session.snapshotEvents())
     expect(replayed.rules).toBeDefined()
     const activeRules = replayed.rules as RunRules

@@ -29,7 +29,8 @@ export async function probeUv(command: string, minimum: string, env: NodeJS.Proc
       if (error.code === 'ENOENT') reject(new Error(`uv is required but was not found: ${command}`))
       else reject(error)
     })
-    child.once('exit', (code) => code === 0 ? resolve(Buffer.concat(stdout).toString('utf8')) : reject(new Error(Buffer.concat(stderr).toString('utf8') || `uv --version exited ${code}`)))
+    // 'close' (not 'exit'): stdout may still be buffered when the process exits.
+    child.once('close', (code) => code === 0 ? resolve(Buffer.concat(stdout).toString('utf8')) : reject(new Error(Buffer.concat(stderr).toString('utf8') || `uv --version exited ${code}`)))
   })
   const current = parseUvVersion(output)
   const required = parseUvVersion(`uv ${minimum}`)

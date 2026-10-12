@@ -1,0 +1,153 @@
+# Integration-test profile reproducing the locked OTX console topology:
+#   - only the otx preset; its MCP tools register asynchronously after agent creation
+#   - plan-mode + dsh-viztools/gate mounted inside the preset's `planning` group that
+#     isolates planMode (the same shape as the real console)
+#   - non-PTC (native) tool presentation, so `run_code` is never visible
+#   - dsh-viztools runtime in managed-readonly mode and the plugin-driven report
+#   - the workspace (cwd) lives outside the plugin directory
+# Test-only pieces: the mock LLM endpoint and the auto-approving question answerer.
+- id: llm-pi-ai
+  config:
+    providers:
+      otx-gateway:
+        displayName: integration mock gateway
+        api: openai-completions
+        apiKeyEnv: OTX_LLM_API_KEY
+        baseURL: !!js process.env.OTX_LLM_BASE_URL
+        timeoutMs: 60000
+        retryPolicy:
+          mode: normal
+          maxRetries: 0
+        models:
+          - id: moonshotai/kimi-k3
+            name: Kimi K3
+            contextWindow: 262144
+            maxTokens: 16384
+          - id: deepseek/deepseek-v4.1-flash
+            name: DeepSeek V4.1 Flash
+            contextWindow: 1000000
+            maxTokens: 8192
+- id: agent-default-model
+  config:
+    provider: otx-gateway
+    model: moonshotai/kimi-k3
+- id: session-title-llm
+  config:
+    targetWords: 5
+    targetCjkCharacters: 10
+    maxInputBytes: 4096
+    maxOutputTokens: 64
+    timeoutMs: 60000
+    provider: otx-gateway
+    model: deepseek/deepseek-v4.1-flash
+- id: llm-deepseek
+  disabled: true
+- id: web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: session-telemetry-otel
+  config:
+    mode: DISABLED
+- id: agent-preset-registry
+  config:
+    default: otx
+- id: preset-standard
+  disabled: true
+- id: preset-ptc
+  disabled: true
+- id: preset-minimal
+  disabled: true
+- id: preset-cordis
+  disabled: true
+- insert:
+    - id: preset-otx
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: otx
+        name: OTX Stage 1
+        description: Integration fixture of the OTX console preset.
+        order: 1
+        plugins:
+          - id: otx-mcp
+            name: '@deepseek-ai/dsh-mcp-client'
+            config:
+              transport: stdio
+              serverName: otx
+              command: !!js process.execPath
+              args: [!!js process.env.OTX_FIXTURE_MCP]
+              env:
+                OTX_FIXTURE_DELAY_MS: !!js process.env.OTX_FIXTURE_DELAY_MS
+                OTX_FIXTURE_CALL_LOG: !!js process.env.OTX_FIXTURE_CALL_LOG
+              toolCallTimeoutMs: 60000
+              failOnStartupError: true
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: |
+                    You are in plan mode. Inspect with the read-only bench tools, then submit the plan with exit_plan_mode.
+              - id: dsh-viztools-gate
+                name: dsh-viztools/gate
+                config:
+                  planFirst:
+                    enabled: true
+                    planningTools: [mcp__otx__bench_status, mcp__otx__describe_profile, mcp__otx__start_run, mcp__otx__parse_snoop, mcp__otx__get_messages]
+                  runRules:
+                    enabled: true
+                    allowedTools: [mcp__otx__bench_status, mcp__otx__describe_profile, mcp__otx__start_run, mcp__otx__parse_snoop, mcp__otx__get_messages, mcp__otx__propose_sequence, mcp__otx__emit_otx, mcp__otx__replay_tx_only, mcp__otx__diff, mcp__otx__finalize_run, mcp__otx__abandon_run, todo_write]
+                    maxLimits:
+                      mcp__otx__replay_tx_only: 6
+- id: tool-bash
+  disabled: true
+- id: tool-pwsh
+  disabled: true
+- id: tool-jobs
+  disabled: true
+- id: tool-fs
+  disabled: true
+- id: tool-fs-search
+  disabled: true
+- id: tool-subagent
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+- id: tool-subagent-control
+  disabled: true
+- id: tool-subagent-list-agents
+  disabled: true
+- id: tool-workflow
+  disabled: true
+- id: tool-ralph
+  disabled: true
+- id: tool-goal
+  disabled: true
+- id: tool-skill
+  disabled: true
+- id: ui-plan
+  disabled: false
+- id: dsh-viztools-runtime
+  config:
+    mode: managed-readonly
+    mcpCodeMode: false
+    managedReportRoot: .dsh/reports
+    environmentDir: .dsh/marimo
+- insert:
+    - id: dsh-viztools-report
+      name: dsh-viztools/report
+      config:
+        enabled: true
+        triggerTools: [mcp__otx__finalize_run, mcp__otx__abandon_run]
+        environmentDir: .dsh/marimo
+        outputDir: .dsh/reports
+    - id: viztools-it-answerer
+      name: viztools-it-answerer

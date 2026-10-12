@@ -1,4 +1,10 @@
-"""Stable trusted marimo app for locked-console report presentation."""
+"""Stable trusted marimo app for locked-console report presentation.
+
+The app only ever reads ``<DSH_VIZTOOLS_REPORT_ROOT>/<session>/state.json`` and the
+``report.html`` it names. The session id comes from the browser query string, so it is
+validated as a single safe path segment before any filesystem access, and every resolved
+path must stay inside that session's directory.
+"""
 
 import marimo
 
@@ -8,41 +14,52 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
-    import json
-    import os
-    from pathlib import Path
     import marimo as mo
-    return Path, json, mo, os
+    from dsh_viztools.managed_view import load_view_state, safe_report_url
+
+    return load_view_state, mo, safe_report_url
 
 
 @app.cell
-def _(Path, json, mo, os):
-    state_root = Path(os.environ.get("DSH_VIZTOOLS_REPORT_ROOT", ".dsh/reports"))
-    session_id = mo.query_params().get("session", "")
-    if not session_id:
-        state = {"status": "pending", "sessionId": "", "updatedAt": 0}
-    else:
-        state_file = state_root / session_id / "state.json"
-        try:
-            state = json.loads(state_file.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            state = {"status": "pending", "sessionId": session_id, "updatedAt": 0}
-    return session_id, state
+def _(mo):
+    # Auto-poll while waiting; a manual button checks for a newer report later.
+    auto_refresh = mo.ui.refresh(default_interval="2s")
+    manual_refresh = mo.ui.refresh(label="Check for a newer report")
+    return auto_refresh, manual_refresh
 
 
 @app.cell
-def _(mo, session_id, state):
-    status = state.get("status")
+def _(auto_refresh, load_view_state, manual_refresh, mo, safe_report_url):
+    auto_refresh.value, manual_refresh.value
+    params = mo.query_params()
+    view_state = load_view_state(params.get("session", "") or "")
+    report_url = safe_report_url(params.get("report_url", "") or "")
+    return report_url, view_state
+
+
+@app.cell
+def _(auto_refresh, manual_refresh, mo, report_url, view_state):
+    status = view_state["status"]
+    session_label = view_state["session"] or "not selected"
     if status == "available":
-        html = state.get("html", "")
-        view = mo.vstack([
-            mo.md(f"# Run report ready\n\nSession: `{session_id}`"),
-            mo.md(f"[Open the generated static report]({html})"),
-        ])
+        header = [mo.md(f"# Run report\n\nSession: `{session_label}`")]
+        if report_url:
+            header.append(mo.md(f"[Open the report in a new tab]({report_url})"))
+        header.append(manual_refresh)
+        view = mo.vstack([*header, mo.iframe(view_state["html"], height="85vh")])
     elif status == "failed":
-        view = mo.md(f"# Report generation failed\n\nSession: `{session_id}`\n\n{state.get('reason', 'Unknown failure')}")
+        view = mo.vstack([
+            mo.md(f"# Report generation failed\n\nSession: `{session_label}`"),
+            mo.plain_text(view_state["reason"]),
+            auto_refresh,
+        ])
+    elif status == "invalid":
+        view = mo.md(f"# Report unavailable\n\n{view_state['reason']}")
     else:
-        view = mo.md(f"# Plan in progress\n\nSession: `{session_id or 'not selected'}`\n\nThe trusted report will appear after the terminal run tool completes.")
+        view = mo.vstack([
+            mo.md(f"# Plan in progress\n\nSession: `{session_label}`\n\nThe trusted report appears here automatically after the terminal run tool completes."),
+            auto_refresh,
+        ])
     view
     return
 

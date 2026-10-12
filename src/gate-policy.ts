@@ -2,13 +2,25 @@ import type { RunRules } from './run-rules.js'
 
 export interface GatePolicyInput {
   readonly knownAgent: boolean
+  /** Whether plan-first gating is configured. When false, plan approval is not required. */
+  readonly planFirst?: boolean
   readonly planApproved: boolean
+  /** Tools callable before plan approval. They remain subject to the deployment ceiling and run rules. */
   readonly planningTools: ReadonlySet<string>
+  /**
+   * Gate control tools (plan exit, rule proposal, PTC transport). Always callable: they
+   * cannot act on the outside world themselves, and nested PTC calls are guarded individually.
+   */
+  readonly controlTools?: ReadonlySet<string>
+  /** Whether a deployment allowlist is configured. When false, `deploymentAllowed` is ignored. */
+  readonly deploymentRestricted?: boolean
   readonly deploymentAllowed: ReadonlySet<string>
   readonly deploymentLimits: Readonly<Record<string, number>>
   readonly rules?: RunRules
+  /** Started (durable) plus reserved (in-flight) calls per tool. */
   readonly counts: Readonly<Record<string, number>>
   readonly tool: string
+  readonly denialMessage?: string
 }
 
 export interface GateDenial {
@@ -18,17 +30,27 @@ export interface GateDenial {
   readonly limit?: number
 }
 
+/** Effective call limit for a tool: the tighter of the deployment cap and the session rule. */
+export function effectiveLimit(tool: string, deploymentLimits: Readonly<Record<string, number>>, rules: RunRules | undefined): number | undefined {
+  const deploymentLimit = deploymentLimits[tool]
+  const sessionLimit = rules?.limits[tool]
+  return deploymentLimit === undefined ? sessionLimit : sessionLimit === undefined ? deploymentLimit : Math.min(deploymentLimit, sessionLimit)
+}
+
 export function decideTool(input: GatePolicyInput): GateDenial | undefined {
   if (!input.knownAgent) return { code: 'GATE_STATE_UNAVAILABLE', reason: 'Plan gate state is unavailable; refusing tool execution.' }
-  if (!input.planApproved && !input.planningTools.has(input.tool)) return { code: 'PLAN_NOT_APPROVED', reason: 'Plan not approved yet.' }
-  if (input.planningTools.has(input.tool)) return undefined
-  if (!input.deploymentAllowed.has(input.tool)) return { code: 'DEPLOYMENT_TOOL_DENIED', reason: `Deployment policy denies tool ${input.tool}.` }
-  if (input.rules !== undefined && (input.rules.deny.includes(input.tool) || (input.rules.allow.length > 0 && !input.rules.allow.includes(input.tool)))) {
+  if (input.controlTools?.has(input.tool) === true) return undefined
+  const planFirst = input.planFirst ?? true
+  if (planFirst && !input.planApproved && !input.planningTools.has(input.tool)) {
+    return { code: 'PLAN_NOT_APPROVED', reason: input.denialMessage ?? 'Plan not approved yet.' }
+  }
+  const deploymentRestricted = input.deploymentRestricted ?? true
+  if (deploymentRestricted && !input.deploymentAllowed.has(input.tool)) return { code: 'DEPLOYMENT_TOOL_DENIED', reason: `Deployment policy denies tool ${input.tool}.` }
+  // `allow` absent means "no session allowlist" (deployment ceiling only); an empty list denies every tool.
+  if (input.rules !== undefined && (input.rules.deny.includes(input.tool) || (input.rules.allow !== undefined && !input.rules.allow.includes(input.tool)))) {
     return { code: 'RUN_RULE_DENIED', reason: `Approved run rules deny tool ${input.tool}.` }
   }
-  const deploymentLimit = input.deploymentLimits[input.tool]
-  const sessionLimit = input.rules?.limits[input.tool]
-  const limit = deploymentLimit === undefined ? sessionLimit : sessionLimit === undefined ? deploymentLimit : Math.min(deploymentLimit, sessionLimit)
+  const limit = effectiveLimit(input.tool, input.deploymentLimits, input.rules)
   const count = input.counts[input.tool] ?? 0
   if (limit !== undefined && count >= limit) return { code: 'RUN_RULE_LIMIT', reason: `Approved run rule limit reached for ${input.tool}: ${limit}.`, count, limit }
   return undefined

@@ -64,8 +64,27 @@ Run tests and confirm failures are fixed.
         explanation = explain_plan(session)
         self.assertTrue(explanation.summary["approved_run_rules"])
         self.assertEqual(explanation.summary["run_rule_refusals"], 1)
-        self.assertEqual(len(explanation.rules), 3)
+        self.assertEqual([row["rule"] for row in explanation.rules], ["allow only read", "deny bash", "max read = 1", "no edits"])
         self.assertEqual(explanation.rules[-1]["enforcement"], "advisory-not-enforced")
+
+    def test_folds_successive_approvals_by_narrowing_like_the_gate(self) -> None:
+        directory, session = self.fixture()
+        self.addCleanup(directory.cleanup)
+        for seq, rules in [(10, {"allow": ["read", "grep"], "deny": [], "limits": {"read": 3}, "notes": []}),
+                           (11, {"allow": ["bash"], "deny": ["grep"], "limits": {"read": 5}, "notes": []})]:
+            session.events.append({"type": "viztools-run-rules/change", "seq": seq, "time": 2_000 + seq,
+                                   "data": {"kind": "approved", "version": 3, "callId": f"r{seq}", "rules": rules}})
+        rows = [row["rule"] for row in explain_plan(session).rules]
+        self.assertIn("allow nothing (empty allowlist)", rows)
+        self.assertIn("max read = 3", rows)
+        self.assertIn("deny grep", rows)
+
+    def test_legacy_v2_empty_allow_means_no_allowlist(self) -> None:
+        directory, session = self.fixture()
+        self.addCleanup(directory.cleanup)
+        session.events.append({"type": "viztools-run-rules/change", "seq": 10, "time": 2_000,
+                               "data": {"kind": "approved", "version": 2, "callId": "r", "rules": {"allow": [], "deny": ["bash"], "limits": {}, "notes": []}}})
+        self.assertEqual([row["rule"] for row in explain_plan(session).rules], ["deny bash"])
 
     def test_classifies_mcp_names(self) -> None:
         self.assertEqual(classify_tool("read")["kind"], "native")

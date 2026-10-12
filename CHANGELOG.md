@@ -4,6 +4,19 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — real-console remediation (2026-10-12)
+
+The real OTX console review overturned the Phase 8 "hardening complete" claim. **OTX promotion is blocked again.**
+
+- **Boot:** sessions are created even when MCP tools register after the agent exists, and `run_code` is no longer required in native presentation. Plan mode resolves from the preset `planning` group; if it is missing, the gate logs a warning and fails closed instead of throwing. Locked mode boots from workspaces outside the plugin directory.
+- **Policy:** absent and empty allowlists are now distinct, so a disjoint intersection denies everything instead of allowing everything. All four `planFirst`/`runRules` combinations work. `denialMessage` is used. `exit_plan_mode`, `propose_run_rules`, and `run_code` are always callable. Planning tools stay under the deployment ceiling. `propose_run_rules` validates against the calling agent's view, so preset-scoped MCP tools are visible to it.
+- **Counts:** run-rules events are now version 3. A synchronous guard reservation plus a durable `started-call` event (written when dispatch begins) replaces `accepted-call`. Parallel calls cannot exceed limits, failed started calls count, and refused calls do not. Version 2 logs still replay with their recorded meaning.
+- **Audit:** final guard refusals are persisted when the decision is made, once per call. Before this they were never written live.
+- **Reports:** a new authenticated route `/api/viztools/report?session=` is owned by the report plugin, so it works without marimo. It serves only a contained `available` export, inside a CSP sandbox. Published state carries `url`. The locked viewer validates session IDs, embeds the report, polls while pending, and links to the route. Resume no longer resets finished state to `pending`. Placeholder values must be one safe path segment. Report background work cannot raise unhandled rejections.
+- **Runtime:** process output is read on `close`, not `exit`. This fixes a uv-probe race that failed a real second boot.
+- **Tests:** added `pnpm test:integration` (real DSH web console + mock LLM + late-registering MCP fixture + headless browser), plus unit suites for the report route, resume, policy combinations, v3 rules, the exit/close race, and the Python viewer and rule folding. `pnpm check`: 87 TS + 22 Python passing.
+- **Known blocker:** DSH 0.2.0-rc.2 refuses to reopen any session log that contains these plugin events after a restart, because plugins cannot mark events `ignorable` in rc.2. See `OTX_HARDENING.md`.
+
 ### Security — OTX hardening Phase 8
 
 - Added a real ToolRuntime OTX acceptance chain covering closed gate, plan approval, replay-stable rule limit, successful terminal execution, modern durable result matching, managed report publication, and locked-profile validation.

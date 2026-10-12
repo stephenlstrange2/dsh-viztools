@@ -119,43 +119,67 @@ Changing any uv setting changes the runtime marker and forces deterministic repr
 
 ### Optional plan-first gate
 
-The enforcement entry is separate from the marimo runtime. Add it to a profile that must block execution until a plan is approved:
+The enforcement entry is separate from the marimo runtime. **Mount it inside the agent preset's `planning` group that isolates `planMode`**, next to `@deepseek-ai/dsh-plan-mode`. This is how the OTX console is laid out. A gate mounted at profile level cannot see the isolated plan-mode service: it logs a warning and keeps non-planning tools refused, but it cannot switch sessions into plan mode.
 
 ```yaml
-- id: dsh-viztools-gate
-  name: dsh-viztools/gate
-  config:
-    planFirst:
-      enabled: true
-      planningTools: [bench_status, describe_profile, parse_snoop, get_messages]
-      denialMessage: Plan not approved yet.
+- insert:
+    - id: preset-otx
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: otx
+        plugins:
+          - id: otx-mcp
+            name: '@deepseek-ai/dsh-mcp-client'
+            config: { transport: stdio, serverName: otx, command: otx-mcp }
+          - id: planning
+            name: cordis:group
+            group: true
+            isolate:
+              planMode: true
+            config:
+              - id: plan-mode
+                name: '@deepseek-ai/dsh-plan-mode'
+                config:
+                  section: Inspect with the read-only tools, then submit the plan with exit_plan_mode.
+              - id: dsh-viztools-gate
+                name: dsh-viztools/gate
+                config:
+                  planFirst:
+                    enabled: true
+                    planningTools: [mcp__otx__bench_status, mcp__otx__describe_profile, mcp__otx__get_messages]
+                    denialMessage: Plan not approved yet.
 ```
 
-New and unapproved resumed sessions enter plan mode. Before a positive `exit_plan_mode` review, only the configured planning tools and `exit_plan_mode` may execute; every refusal is recorded durably. Approval survives resume, and forks inherit the gate state at their fork point. The entry fails agent activation if a configured planning tool is unavailable.
+New sessions, and resumed sessions without an approved plan, enter plan mode. Until a positive `exit_plan_mode` review, only the planning tools and the gate's control tools can execute: `exit_plan_mode`, `propose_run_rules` when run rules are enabled, and the PTC transport `run_code`. Each refusal is written durably at the moment the guard decides it, once per call. Approval survives resume, and forks inherit the gate state at their fork point.
 
-The gate enforces both native calls and nested PTC dispatches. Plan mode alone is not treated as authorization, so `/plan off`, a dismissed review, or **Keep planning** does not open it.
+Policy is decided per call, not at agent creation. MCP tools that register after the agent exists are handled correctly, and native (non-PTC) presets need no `run_code`. The gate enforces both native calls and nested PTC dispatches. Plan mode alone is not authorization: `/plan off`, a dismissed review, or **Keep planning** does not open the gate.
+
+| `planFirst` | `runRules` | Behavior |
+|---|---|---|
+| on | off | Planning tools only until approval; then every tool |
+| off | on | No plan needed; deployment `allowedTools`/`maxLimits` and approved rules apply |
+| on | on | Planning tools (which must be listed in `allowedTools`) until approval; then the deployment ceiling plus approved rules |
+| off | off | Gate inactive |
 
 ### Approved run rules
 
 The same gate entry can enable typed, user-approved rules that only narrow the deployment's tool policy:
 
 ```yaml
-- id: dsh-viztools-gate
-  name: dsh-viztools/gate
-  config:
-    planFirst:
-      enabled: true
-      planningTools: [bench_status, describe_profile, parse_snoop, get_messages]
-    runRules:
-      enabled: true
-      allowedTools: [bench_status, describe_profile, parse_snoop, get_messages, replay_tx_only, diff, finalize_run]
-      maxLimits:
-        replay_tx_only: 2
+runRules:
+  enabled: true
+  allowedTools: [mcp__otx__bench_status, mcp__otx__get_messages, mcp__otx__replay_tx_only, mcp__otx__diff, mcp__otx__finalize_run]
+  maxLimits:
+    mcp__otx__replay_tx_only: 6
 ```
 
-The agent calls `propose_run_rules` with structured `allow`, `deny`, `limits`, and `notes`. The plugin rejects any rule outside `allowedTools` or any limit above `maxLimits`, then asks the user to approve the complete value. Approved allow/deny and limits are enforced for native and PTC calls. Refusals and limit exhaustion are durable. Free-text notes enter the system prompt labelled **advisory; not mechanically enforced**.
+The agent calls `propose_run_rules` with `deny`, `limits`, `notes`, and an optional `allow`. Omitting `allow` keeps the deployment set. An empty `allow` denies every governed tool, and so does an empty intersection of successive approvals. The plugin validates the proposal against the calling agent's tool view, rejects anything outside `allowedTools` or above `maxLimits`, and then asks the user to approve the complete value. Successive approvals only narrow: allowlists intersect, denylists union, and limits take the minimum.
 
-`explain_plan()` exposes a `rules` table showing enforced rules, observed calls, refused calls, and advisory notes.
+Limits count calls that actually started. The guard reserves a slot synchronously, so parallel calls cannot overshoot, and a durable `started-call` event is written when dispatch begins. Failed calls that started still count. Refused calls do not. Live and resumed counts come from the same fold. Free-text notes enter the system prompt labelled **advisory; not mechanically enforced**. Delegation (`subagent`, `subagent_fork`, `workflow`) is refused while approved rules govern the session.
+
+`explain_plan()` exposes a `rules` table showing enforced rules (including the allowlist), observed calls, refused calls, and advisory notes.
+
+> **Known blocker (DSH 0.2.0-rc.2):** DSH refuses to reopen, after a restart, a session log that contains these durable plugin events. rc.2 gives plugins no way to mark events `ignorable`. Live sessions work. See [OTX_HARDENING.md](OTX_HARDENING.md).
 
 ### Automatic reports
 
@@ -180,7 +204,9 @@ Enable the separate report entry to generate a trusted, per-session report witho
 
 Before generation the plugin flushes session persistence and asks the JSONL backend for the exact current trajectory path. It writes `.dsh/reports/<session-id>/report.py`, `inputs.json`, and `report.html`; profile-supplied templates receive only structured inputs and trusted workspace paths. `--no-include-code` produces a code-free export by default.
 
-Generation is idempotent on session, trigger sequence, and template version. Both successful and failed attempts become durable `viztools-report/change` events, so resume does not duplicate an already settled report. The bundled template summarizes session metrics, tool calls, plan evidence, and approved run rules.
+Generation is idempotent on session, trigger sequence, and template version. Both successful and failed attempts become durable `viztools-report/change` events, so resume does not duplicate an already settled report, and resuming an agent never resets a finished report's state to `pending`. Values extracted from tool results (for example `{runId}`) must match the deployment pattern and must also be a single safe path segment. The bundled template summarizes session metrics, tool calls, plan evidence, and approved run rules.
+
+When DSH web is present, the report entry serves finished exports at `/api/viztools/report?session=<id>`. That route sits behind DSH's Host/Origin and browser-session authentication and does not depend on marimo. It serves only an `available` export that resolves to that session's `report.html`, with `Cache-Control: no-store` and `Content-Security-Policy: sandbox allow-scripts …`, so report scripts run in an opaque origin and cannot call DSH APIs as the operator.
 
 ### Secure automatic sidebar
 
@@ -188,7 +214,7 @@ When a Session appears on screen, the Client plugin requests the marimo URL from
 
 ### Locked-console mode
 
-Use `managed-readonly` only with a notebook already generated by the trusted report service:
+Locked mode serves the plugin-owned viewer app bundled in the package. It works from any workspace, including one outside the plugin directory, and is pinned to its real path inside the package:
 
 ```yaml
 - id: dsh-viztools-runtime
@@ -196,12 +222,11 @@ Use `managed-readonly` only with a notebook already generated by the trusted rep
   config:
     mode: managed-readonly
     mcpCodeMode: false
-    notebook: .dsh/reports/current/report.py
-    managedReportRoot: .dsh/reports
+    managedReportRoot: .dsh/reports   # must match the report entry's outputDir
     environmentDir: .dsh/marimo
 ```
 
-This mode runs `marimo run`, sends no notebook source to the browser, hides detailed tracebacks, exposes no marimo MCP endpoint, and registers no model-facing marimo tools or notebook skills. The notebook must exist below `managedReportRoot`; runtime refuses to create a starter notebook.
+This mode runs `marimo run`, sends no notebook source to the browser, hides detailed tracebacks, exposes no marimo MCP endpoint, and registers no model-facing marimo tools or notebook skills. For the mounted session, the viewer validates the session ID as one safe path segment, polls while the report is pending, embeds the contained export once it is available, and links to the authenticated report route.
 
 The package exports `checkLockedProfile()` from `dsh-viztools/profile-check`. Internal profile validation should also inspect the complete composition for duplicate editable runtime entries, untrusted template paths, arbitrary code tools, and exact supported version pins. See [THREAT_MODEL.md](THREAT_MODEL.md).
 

@@ -55,10 +55,16 @@ export function extractDynamicInputs(events: readonly SessionEvent[], specs: Rea
   return values
 }
 
+/** One path segment: no separators, no traversal, no leading dot, bounded length. */
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+
 export function substitutePlaceholders(template: string, values: Readonly<Record<string, string>>): string {
   return template.replace(/\{([A-Za-z][A-Za-z0-9_]*)\}/g, (_match, name: string) => {
     const value = values[name]
     if (value === undefined) throw new Error(`missing dynamic input placeholder: ${name}`)
+    // Tool output is untrusted even after the configured pattern matched: a placeholder value
+    // may only ever fill a single path segment, never introduce separators or traversal.
+    if (!SAFE_SEGMENT.test(value) || value.includes('..')) throw new Error(`dynamic input ${name} is not a safe path segment`)
     return value
   })
 }

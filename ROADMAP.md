@@ -248,6 +248,15 @@ Before an internal rollout, the following scenarios must pass end to end:
 
 **Milestone status revised: OTX release blocked (2026-10-09).** CI and release infrastructure remain useful, but the architecture review identified critical enforcement and reporting gaps not exercised by the earlier fold-only lifecycle fixture. Phase 0 now freezes those gaps as explicit todo acceptance contracts in `test/otx-hardening.todo.test.ts`. Package version remains `0.1.0`; v1 is prohibited until Phases 1–8 in `SECURITY_REVIEW.md` are green and internal acceptance is signed off.
 
+**Milestone status revised: OTX release blocked (2026-10-12).** Phases 1–8 were green on fixtures, but a review on the real OTX console found boot blockers and policy/count leaks. These are now fixed (remediation A–D in `OTX_HARDENING.md`). The new `pnpm test:integration` boots real DSH web in the OTX topology and passes 29 of 31 checks. The remaining failures are one platform blocker: DSH 0.2.0-rc.2 cannot reopen session logs that contain plugin events after a restart. Choosing a durable-state storage approach is the next milestone.
+
+- [x] Remediation A: boot in the real topology (late MCP tools, isolated plan mode, outside workspace).
+- [x] Remediation B: absent vs empty allowlist, combo semantics, control tools, reservation + `started-call` counting.
+- [x] Remediation C: durable refusal audit at decision time.
+- [x] Remediation D: contained viewer, authenticated report route, polling, resume-safe state.
+- [x] Real-profile integration test (`pnpm test:integration`).
+- [ ] Durable plugin state that survives a DSH restart (decision pending).
+
 ## Dependency order
 
 ```text
