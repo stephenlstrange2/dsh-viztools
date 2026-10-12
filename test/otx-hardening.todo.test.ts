@@ -12,12 +12,7 @@ describe('OTX hardening release blockers', () => {
 
   it.todo('PTC plan flow can reach exit_plan_mode without opening non-planning tools')
 
-  it.todo('run id extracted from durable start_run result resolves report artifacts')
 
-  it.todo('token is absent from process argv and supplied through a mode-0600 token file')
-  it.todo('template and extra-input symlink escapes are rejected after realpath')
-  it.todo('session id cannot escape or collide in report output directory')
-  it.todo('requirements lock content hash changes runtime install marker')
   it.todo('default report redacts tokenized URLs and bounds large tool arguments')
 
   it('keeps realistic modern DSH and PTC fixture shapes', () => {

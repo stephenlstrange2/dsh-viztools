@@ -1,6 +1,6 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { createConnection, createServer } from 'node:net'
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, type ChildProcess } from 'node:child_process'
@@ -107,6 +107,7 @@ export class MarimoRuntime {
   readonly exportPath: string
   private child: ChildProcess | undefined
   private current: RuntimeStatus | undefined
+  private tokenFile: string | undefined
 
   constructor(private readonly config: ResolvedConfig) {
     this.cwd = resolve(config.cwd || process.cwd())
@@ -141,13 +142,14 @@ export class MarimoRuntime {
     const uvEnv = this.uvEnvironment()
     await probeUv(uvCommand, this.config.uv.minVersion, uvEnv)
     const marker = join(this.environmentDir, 'runtime.json')
-    const wanted = JSON.stringify({ marimo: this.config.marimoVersion, python: this.config.pythonVersion, loader: 2, uv: this.config.uv })
+    const requirements = resolveRequirementsPath(this.cwd, this.config.uv.requirements)
+    const requirementsHash = createHash('sha256').update(await readFile(requirements)).digest('hex')
+    const wanted = JSON.stringify({ marimo: this.config.marimoVersion, python: this.config.pythonVersion, loader: 3, uv: this.config.uv, requirementsHash })
     let installed = ''
     try { installed = await readFile(marker, 'utf8') } catch { /* first run */ }
     if (installed === wanted) return
 
     await run(uvCommand, ['venv', '--clear', '--python', this.config.pythonVersion, join(this.environmentDir, '.venv')], this.cwd, this.config.startupTimeoutMs, uvEnv)
-    const requirements = resolveRequirementsPath(this.cwd, this.config.uv.requirements)
     const installArgs = ['pip', 'install', '--python', this.python(), '--requirements', requirements]
     if (this.config.uv.requireHashes) installArgs.push('--require-hashes')
     if (this.config.uv.offline) installArgs.push('--offline', '--no-index')
@@ -174,11 +176,15 @@ export class MarimoRuntime {
 
     const port = await freePort()
     const token = randomBytes(32).toString('base64url')
+    const tokenFile = join(this.environmentDir, `token-${process.pid}-${Date.now()}`)
+    await writeFile(tokenFile, token, { encoding: 'utf8', mode: 0o600 })
+    await chmod(tokenFile, 0o600)
+    this.tokenFile = tokenFile
     const readonly = this.config.mode === 'managed-readonly'
     const args = [
       '-m', 'marimo', readonly ? 'run' : 'edit', this.notebook,
       '--headless', '--host', '127.0.0.1', '--port', String(port),
-      '--token-password', token,
+      '--token-password-file', tokenFile,
       ...(readonly ? ['--no-show-tracebacks'] : ['--skip-update-check', '--watch']),
       ...(!readonly && this.config.mcpCodeMode ? ['--mcp=code-mode'] : []),
     ]
@@ -191,7 +197,11 @@ export class MarimoRuntime {
     this.child = child
     let startupError = ''
     child.stderr?.on('data', (chunk: Buffer) => { startupError = `${startupError}${chunk.toString('utf8')}`.slice(-16_384) })
-    child.once('exit', () => { this.current = undefined })
+    child.once('exit', () => {
+      this.current = undefined
+      if (this.tokenFile !== undefined) void rm(this.tokenFile, { force: true })
+      this.tokenFile = undefined
+    })
     try {
       await waitForPort(port, child, this.config.startupTimeoutMs)
     } catch (error) {
@@ -227,12 +237,18 @@ export class MarimoRuntime {
     const child = this.child
     this.child = undefined
     this.current = undefined
-    if (child === undefined || child.exitCode !== null) return
+    if (child === undefined || child.exitCode !== null) {
+      if (this.tokenFile !== undefined) await rm(this.tokenFile, { force: true })
+      this.tokenFile = undefined
+      return
+    }
     await new Promise<void>((resolvePromise) => {
       const timer = setTimeout(() => { child.kill('SIGKILL'); resolvePromise() }, 2_000)
       timer.unref()
       child.once('exit', () => { clearTimeout(timer); resolvePromise() })
       child.kill('SIGTERM')
     })
+    if (this.tokenFile !== undefined) await rm(this.tokenFile, { force: true })
+    this.tokenFile = undefined
   }
 }

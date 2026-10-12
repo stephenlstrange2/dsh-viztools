@@ -37,8 +37,8 @@ The 2026-10-09 architecture review found critical gaps in enforcement ordering, 
 - [x] Phase 2: monotonic rules, replay-stable committed counters, stricter-deployment replay validation, fork policy
 - [x] Phase 3: report only after matching durable terminal result; timeout/cancellation/coalescing
 - [x] Phase 4: stable locked placeholder/current-report app
-- [ ] Phase 5: durable run-id artifact resolution
-- [ ] Phase 6: token file, realpath containment, safe session directory identity, lock-content marker
+- [x] Phase 5: durable run-id artifact resolution
+- [x] Phase 6: token file, realpath containment, safe session directory identity, lock-content marker
 - [ ] Phase 7: default report argument redaction/bounds
 - [ ] Phase 8: real ToolRuntime/Agent-loop OTX acceptance suite
 

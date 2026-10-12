@@ -10,8 +10,8 @@ Phase 0 freezes the 2026-10-09 review findings as 22 named acceptance contracts 
 2. Monotonic rule merges, replay-stable counters, deployment fingerprint, fork policy — **complete 2026-10-09**
 3. Post-commit terminal report trigger, timeout/cancellation, turn coalescing — **complete 2026-10-09**
 4. Stable locked placeholder/current-report app — **complete 2026-10-09**
-5. Durable run-id input resolution
-6. Token file, realpath containment, safe session paths, lock-content marker
+5. Durable run-id input resolution — **complete 2026-10-09**
+6. Token file, realpath containment, safe session paths, lock-content marker — **complete 2026-10-12**
 7. Default report argument redaction and bounds
 8. Real ToolRuntime/Agent-loop OTX acceptance suite
 
@@ -20,7 +20,7 @@ Complete exactly one phase at a time. Convert its todo tests into active asserti
 ## Baseline evidence
 
 ```text
-59 passed | 7 todo
+68 passed | 2 todo
 9 Python tests passed
 ```
 

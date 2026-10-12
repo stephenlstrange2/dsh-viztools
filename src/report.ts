@@ -2,7 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEventMap } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
-import { mkdir, copyFile, writeFile } from 'node:fs/promises'
+import { mkdir, copyFile, realpath, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -10,6 +10,7 @@ import z from '@deepseek-ai/schemastery'
 import { completedReportKeys, reportKey, REPORT_EVENT, type ReportChange } from './report-domain.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 import { publishManagedState } from './managed-state.js'
+import { containedRealpath, extractDynamicInputs, substitutePlaceholders, type DynamicInputSpec } from './dynamic-inputs.js'
 
 export { completedReportKeys, reportKey, REPORT_EVENT } from './report-domain.js'
 export type { ReportChange } from './report-domain.js'
@@ -31,6 +32,8 @@ export interface Config {
   includeCode?: boolean
   environmentDir?: string
   extraInputs?: Record<string, string>
+  dynamicInputs?: Record<string, DynamicInputSpec>
+  extraInputRoot?: string
   timeoutMs?: number
   killGraceMs?: number
 }
@@ -46,6 +49,8 @@ export interface ResolvedConfig {
   includeCode: boolean
   environmentDir: string
   extraInputs: Record<string, string>
+  dynamicInputs: Record<string, DynamicInputSpec>
+  extraInputRoot: string
   timeoutMs: number
   killGraceMs: number
 }
@@ -61,6 +66,8 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   includeCode: z.boolean().default(false),
   environmentDir: z.string().default('.dsh/marimo'),
   extraInputs: z.dict(String).default({}),
+  dynamicInputs: z.dict(z.object({ tool: z.string().required(), field: z.string().required(), pattern: z.string().required() })).default({}),
+  extraInputRoot: z.string().default('.'),
   timeoutMs: z.number().min(1_000).default(120_000),
   killGraceMs: z.number().min(100).default(2_000),
 })
@@ -80,6 +87,19 @@ function safePath(root: string, value: string, label: string): string {
   const result = resolve(root, value)
   if (!within(root, result)) throw new Error(`${label} must stay inside the workspace: ${result}`)
   return result
+}
+
+async function containedExistingPath(root: string, value: string, label: string): Promise<string> {
+  const trusted = await realpath(root)
+  const target = await realpath(resolve(root, value))
+  const rel = relative(trusted, target)
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error(`${label} resolves outside trusted root: ${target}`)
+  return target
+}
+
+function safeSessionId(value: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value)) throw new Error(`invalid report session id: ${value}`)
+  return value
 }
 
 function python(environmentDir: string): string {
@@ -129,7 +149,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const cwd = resolve(config.cwd || process.cwd())
   const outputRoot = safePath(cwd, config.outputDir, 'report outputDir')
   const environmentDir = safePath(cwd, config.environmentDir, 'report environmentDir')
-  const template = config.template === '' ? DEFAULT_TEMPLATE : safePath(cwd, config.template, 'report template')
+  const templatePromise = config.template === '' ? realpath(DEFAULT_TEMPLATE) : containedExistingPath(cwd, config.template, 'report template')
   const inFlight = new Map<string, Promise<void>>()
   const pending = new WeakMap<Agent, Map<string, PendingTerminalTrigger>>()
   const turnScheduled = new Set<string>()
@@ -140,26 +160,33 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     const existing = inFlight.get(key)
     if (existing !== undefined) return existing
     const work = (async () => {
-      const directory = join(outputRoot, String(agent.id))
+      const sessionId = safeSessionId(String(agent.id))
+      const directory = join(outputRoot, sessionId)
       const notebook = join(directory, 'report.py')
       const html = join(directory, 'report.html')
       const inputsPath = join(directory, 'inputs.json')
       try {
         const trajectory = await resolveTrajectoryPath(ctx.sessionPersistence, agent)
+        const template = await templatePromise
+        const dynamic = extractDynamicInputs(agent.session.snapshotEvents(), config.dynamicInputs)
         const extras: Record<string, string> = {}
-        for (const [name, value] of Object.entries(config.extraInputs)) extras[name] = safePath(cwd, value, `report extra input ${name}`)
+        const inputRoot = safePath(cwd, config.extraInputRoot, 'report extraInputRoot')
+        for (const [name, value] of Object.entries(config.extraInputs)) {
+          const substituted = substitutePlaceholders(value, dynamic)
+          extras[name] = await containedRealpath(inputRoot, substituted, `report extra input ${name}`)
+        }
         await mkdir(directory, { recursive: true })
         await copyFile(template, notebook)
-        await writeFile(inputsPath, JSON.stringify({ sessionId: String(agent.id), trigger, triggerSeq, trajectory, extras }, null, 2), 'utf8')
+        await writeFile(inputsPath, JSON.stringify({ sessionId, trigger, triggerSeq, trajectory, dynamic, extras }, null, 2), 'utf8')
         const pythonPath = join(PACKAGE_ROOT, 'python')
         await runReportCommand(python(environmentDir), [
           '-m', 'marimo', 'export', 'html', notebook, '--force', config.includeCode ? '--include-code' : '--no-include-code', '-o', html,
         ], cwd, { PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${process.platform === 'win32' ? ';' : ':'}${process.env.PYTHONPATH}` : pythonPath }, config.timeoutMs, config.killGraceMs)
-        await publishManagedState(outputRoot, { status: 'available', sessionId: String(agent.id), html, updatedAt: Date.now() })
+        await publishManagedState(outputRoot, { status: 'available', sessionId, html, updatedAt: Date.now() })
         append(agent, { kind: 'available', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, notebook, html, inputs: inputsPath })
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error)
-        await publishManagedState(outputRoot, { status: 'failed', sessionId: String(agent.id), reason, updatedAt: Date.now() })
+        await publishManagedState(outputRoot, { status: 'failed', sessionId, reason, updatedAt: Date.now() })
         append(agent, { kind: 'failed', version: 1, triggerSeq, trigger, templateVersion: config.templateVersion, reason })
       }
     })().finally(() => inFlight.delete(key))

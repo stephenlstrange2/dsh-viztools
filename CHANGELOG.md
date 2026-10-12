@@ -4,6 +4,22 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — OTX hardening Phase 6
+
+- Marimo authentication now uses a mode-0600 token file; the secret no longer appears in process argv and is removed on child exit or runtime stop.
+- The Python requirements-lock SHA-256 is included in the environment marker, forcing reprovisioning when lock contents change.
+- Trusted report templates and extra inputs are realpath-contained, including symlink-escape rejection.
+- Report Session IDs use a strict safe grammar before directory construction.
+- Reduced outstanding OTX blockers from 6 to 2.
+
+### Security — OTX hardening Phase 5
+
+- Added configurable extraction of values such as `run_id` from successful durable tool-result content blocks.
+- Dynamic values require deployment-supplied strict regular-expression validation before substitution.
+- Configured extra artifact paths support named placeholders and are realpath-contained beneath a trusted input root, including symlink-escape rejection.
+- Structured templates receive both extracted dynamic values and resolved artifact paths.
+- Reduced outstanding OTX blockers from 7 to 6.
+
 ### Security — OTX hardening Phase 4
 
 - Locked mode now always serves one bundled trusted managed-report app, so a fresh console boots with a Plan in progress placeholder.
