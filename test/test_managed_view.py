@@ -86,6 +86,8 @@ class ManagedViewTest(unittest.TestCase):
         (state / "s1.status.json").write_text(json.dumps({"sessionId": "s1", "planNotice": "Plan mode is unavailable in this deployment"}), encoding="utf-8")
         (state / "s2.status.json").write_text(json.dumps({"sessionId": "other", "planNotice": "x"}), encoding="utf-8")
         self.assertEqual(load_gate_status("s1", state), ["Plan mode is unavailable in this deployment"])
+        (state / "s3.status.json").write_text(json.dumps({"sessionId": "s3", "stateBroken": "gate record #2 is malformed"}), encoding="utf-8")
+        self.assertEqual(load_gate_status("s3", state), ["gate record #2 is malformed"])
         self.assertEqual(load_gate_status("s2", state), [])
         self.assertEqual(load_gate_status("../s1", state), [])
         self.assertEqual(load_gate_status("missing", state), [])

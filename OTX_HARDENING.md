@@ -27,11 +27,19 @@ Status: **automated blockers closed; internal acceptance pending** (see `SECURIT
    Tests: `gate-runtime`, `test_managed_view.py`.
 7. **Report content:** plan text and approval time, "Rules vs. what happened", and a narrow tool table. Tests: `test/test_plugin_state.py`.
 
+## Follow-up on a751b39 (2026-10-13, reproduced with PoCs)
+
+1. **HIGH:** the hash chain was unkeyed, so forged appends and tail truncation went undetected. Now an HMAC-SHA256 chain with the key in `$DSH_HOME/viztools` (outside the workspace), plus a MAC'd anchor with the head and lineage. `THREAT_MODEL.md` is corrected. Tests: `state-store`, `gate-runtime` (PoCs).
+2. **Forks:** inherited approval is valid through lineage, and lineage is recursive. Tests: `state-store`, `gate-runtime`.
+3. **run_code before approval** also requires `allowedTools` and valid rules, and reads the deployment default mode from `sandboxPolicy`. Tests: `gate-runtime`.
+4. **Repair:** takes the `session.lock` lease or refuses; unique exclusive temp files fsync'd before rename; a fork's inherited events are not re-exported. Tests: `repair`, integration (refused while live).
+5. **Malformed state** denies all tools with a notice instead of crashing agent creation. Tests: `gate-runtime`, `test_managed_view.py`.
+
 ## Evidence
 
 ```text
-pnpm check:            118 TypeScript tests, 31 Python tests passed
-pnpm test:integration: 41/41 checks passed (real DSH 0.2.0-rc.2 web, OTX topology, restart + resume + repair)
+pnpm check:            133 TypeScript tests, 31 Python tests passed
+pnpm test:integration: 42/42 checks passed (real DSH 0.2.0-rc.2 web, OTX topology, restart + resume + repair, live-lease refusal)
 ```
 
 ## Remaining (not automatable here)

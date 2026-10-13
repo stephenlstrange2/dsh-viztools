@@ -152,7 +152,7 @@ The enforcement entry is separate from the marimo runtime. **Mount it inside the
 
 New sessions, and resumed sessions without an approved plan, enter plan mode. Until a positive `exit_plan_mode` review, only the planning tools and the gate's control tools can execute: `exit_plan_mode`, and `propose_run_rules` when run rules are enabled. Each refusal is written durably at the moment the guard decides it, once per call. Approval survives resume, and forks inherit the gate state at their fork point. If plan mode is not available, the refusal text and the locked viewer both say so, so the session is not silently stuck.
 
-**`run_code` is governed like any other tool.** Its program gets Node APIs (fs, net, child_process) that only the DSH sandbox limits, so allowing it before approval would bypass the gate. It is refused before approval unless the deployment sets `planFirst.allowPtcTransport: true` **and** the session's file policy is confined (`read-only` or `workspace-write`, never `danger-full-access` or unknown). After approval, it is subject to `runRules.allowedTools` and the session rules. PTC presets that plan through `run_code` must opt in.
+**`run_code` is governed like any other tool.** Its program gets Node APIs (fs, net, child_process) that only the DSH sandbox limits, so allowing it before approval would bypass the gate. It is refused before approval unless the deployment sets `planFirst.allowPtcTransport: true` **and** the session's effective file policy is confined (`read-only` or `workspace-write`, never `danger-full-access` or unknown). The effective policy is the session's latest `sandbox/mode` override, or else the deployment default from DSH's `sandboxPolicy`. Even then it must be in `runRules.allowedTools`, and it is refused while saved rules are invalid. After approval it is governed like any other tool. PTC presets that plan through `run_code` must opt in.
 
 **Delegation** (`subagent`, `subagent_fork`, `workflow`) is refused whenever the gate is active, because a child agent would escape the parent's approval and limits. Set `delegation.allow: true` to opt in. Children created by an allowed delegation call then share the parent's gate: the same approval, rules, and counts. A child that cannot be attached to its parent gets no fresh budget: its limited tools are refused.
 
@@ -189,10 +189,10 @@ If saved rules no longer fit the deployment (allowed tools or caps changed), the
 
 DSH 0.2.0-rc.2 refuses to reopen a session log that contains an unknown event type unless it is marked `ignorable`, and rc.2 gives plugins no way to set that marker. So dsh-viztools **writes no custom event types into `session.jsonl`**. State goes to:
 
-- **DSH 0.2.0-rc.2:** a plugin-owned sidecar per session under the workspace, `<stateDir>/<session>.gate.jsonl` and `<session>.report.jsonl` (default `stateDir: .dsh/viztools/state`). Each sidecar is append-only, fsync'd after every record, mode 0600, and an index plus SHA-256 chain over the records detects truncation or edits. Forks inherit the parent's records up to the fork point.
+- **DSH 0.2.0-rc.2:** a plugin-owned sidecar per session under the workspace, `<stateDir>/<session>.gate.jsonl` and `<session>.report.jsonl` (default `stateDir: .dsh/viztools/state`). It is append-only, fsync'd after every record, and mode 0600. Each record carries an **HMAC-SHA256 chained to the previous record**. The key lives **outside the workspace** in `<keyDir>/sidecar.key` (default `keyDir: $DSH_HOME/viztools`; a `keyDir` inside the workspace is rejected). A MAC'd **anchor** in `<keyDir>/anchors/` names each session's last record and its fork lineage. Forged appends, edits, a deleted sidecar, and tail truncation are all detected. Forks inherit their parent's records up to the fork point, recursively through grandchildren.
 - **DSH with `appendPluginRecord` (0.2.1+):** ignorable `plugin:dsh-viztools/<channel>` records in the session log, selected automatically at runtime.
 
-The gate fails closed when it cannot trust this state. If the sidecar is missing although the session log shows gated activity, or it is truncated or edited, plan approval is reset and saved rules are refused until they are re-approved. Tools with call limits stay refused for the rest of that session, because their counts cannot be trusted. The same applies when a completed call to a limited tool in the session log has no recorded decision. The sidecar is located through the gate's `cwd`/`stateDir`, so start the console from the same workspace.
+The gate fails closed when it cannot trust this state. If the sidecar is missing although its anchor or the session log shows gated activity, or a record fails authentication, or records are missing from the tail, then plan approval is reset and saved rules are refused until they are re-approved. Tools with call limits stay refused for the rest of that session, because their counts can no longer be trusted. The same applies when a completed call to a limited tool in the session log has no recorded decision. A record that authenticates but cannot be interpreted, or state that cannot be read at all, makes the gate **refuse every tool**, with a notice in the refusal and the viewer; it never breaks session creation. The sidecar is located through the gate's `cwd`/`stateDir`, so start the console from the same workspace. Use the same `keyDir` for the gate, the report, and `dsh-viztools-repair`.
 
 #### Repairing sessions written by older versions
 
@@ -203,7 +203,7 @@ dsh-viztools-repair --dsh-home ~/.dsh --workspace /path/to/console/cwd --dry-run
 dsh-viztools-repair --dsh-home ~/.dsh --workspace /path/to/console/cwd             # repair
 ```
 
-The repair backs up each changed log as `<log>.viztools-backup-<time>`, exports the legacy state into the sidecar (unless one already exists), and marks the legacy events `ignorable: true` in place. It converts rather than deletes: other events refer to sequence numbers, so deleting events would renumber the log and corrupt it. Zstd logs keep DSH's frame layout, with the header alone in the first frame. Use `--session <id>` to limit the repair to specific sessions.
+Each session is repaired only while holding DSH's own session lease (a non-blocking `flock(2)` on `session.lock`, taken through DSH's native addon or the `flock` command); a session that a running DSH still holds is refused. The repair backs up each changed log under a unique `<log>.viztools-backup-<time>-<random>` name and exports the legacy state into the keyed sidecar (unless one already exists). It then marks the legacy events `ignorable: true` in place, writing through a unique, exclusively created temp file that is fsync'd before the rename. It converts rather than deletes: other events refer to sequence numbers, so deleting events would renumber the log and corrupt it. A fork's inherited legacy events (before its `session/end-seed` cut) are marked but not exported again: they belong to the parent and are inherited through lineage. Zstd logs keep DSH's frame layout, with the header alone in the first frame. Use `--session <id>` to limit the repair to specific sessions, and `--key-dir` if the gate uses a non-default `keyDir`.
 
 ### Migration notes (from `ca3b3ca`)
 
@@ -214,6 +214,7 @@ No public config key was renamed or removed. New keys, all optional:
 | gate | `planFirst.allowPtcTransport` | `false` | Allow `run_code` before approval (only under a confined file policy) |
 | gate | `delegation.allow` | `false` | Allow `subagent`/`subagent_fork`/`workflow`; children share the parent's gate |
 | gate | `cwd`, `stateDir` | process cwd, `.dsh/viztools/state` | Where the gate sidecar and status files live |
+| gate, report | `keyDir` | `$DSH_HOME/viztools` | HMAC key and anchors; must be outside the workspace |
 | report | `stateDir`, `gateStateDir` | `.dsh/viztools/state` | Report sidecar; gate sidecar path passed to templates |
 | runtime | `gateStateDir` | `.dsh/viztools/state` | Gate status files shown by the locked viewer |
 
@@ -221,6 +222,7 @@ Behavior changes that can affect existing profiles:
 
 - `run_code` is refused before approval by default. PTC presets that plan through it need `planFirst.allowPtcTransport: true` and a confined file policy.
 - Delegation tools are refused whenever the gate is active, unless `delegation.allow: true` is set.
+- Sidecars written by `a751b39` (unkeyed chain) have no MACs or anchors, so they open as damaged and fail closed. Start new sessions, or re-run the repair from a backup of the original log.
 - Gate and report state moved out of the session log. Run `dsh-viztools-repair` once for sessions written by older versions. Without the repair, those sessions open with fail-closed gate state: plan approval is required again and limited tools stay refused.
 - Report templates receive `pluginState` (sidecar paths) in `inputs.json`. Custom templates that read `viztools-*` events from the trajectory should call `dsh_viztools.plugin_state.gate_records(session)` instead, which reads all three backends.
 

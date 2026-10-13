@@ -25,13 +25,14 @@ interface Harness {
   ran: string[]
 }
 
-async function harness(config: GateInput, options: { planMode?: boolean; tools?: string[]; pluginRecords?: PluginRecordApi | null; root?: string } = {}): Promise<Harness> {
+async function harness(config: GateInput, options: { planMode?: boolean; tools?: string[]; pluginRecords?: PluginRecordApi | null; root?: string; sandboxPolicy?: Record<string, unknown> } = {}): Promise<Harness> {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'viztools-gate-'))
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {} as never).await()
   await ctx.plugin(ToolRuntime).await()
   ctx.provide('userQuestions', { ask: async (request: { questions: { id: string }[] }) => ({ answers: request.questions.map((q) => ({ id: q.id, selected: ['Approve'] })) }) } as never)
   if (options.planMode !== false) ctx.provide('planMode', { set: () => 'committed' } as never)
+  if (options.sandboxPolicy !== undefined) ctx.provide('sandboxPolicy', options.sandboxPolicy as never)
   const ran: string[] = []
   for (const name of options.tools ?? ['bench_status', 'replay', 'diff', 'subagent']) ctx.tools.register(ok(name, () => { ran.push(name); return { ok: true } }))
   ctx.tools.register(ok('exit_plan_mode', () => ({ approved: true })))
@@ -154,6 +155,43 @@ describe('gate durable state (sidecar on DSH rc.2)', () => {
   })
 })
 
+describe('keyed chain and out-of-workspace anchor (item 1, PoCs)', () => {
+  it('a forged plan approval appended from the workspace is rejected', async () => {
+    const h = await harness(otx())
+    const agent = await h.agent('k1')
+    expect((await h.call(agent, 'diff', 'd0')).isError).toBe(true)
+    const path = join(h.root, '.dsh/viztools/state', 'k1.gate.jsonl')
+    const last = (await sidecar(h.root, 'k1')).at(-1) as unknown as { i: number; mac: string }
+    const { createHash } = await import('node:crypto')
+    const forged = { i: last.i + 1, prev: last.mac, t: Date.now(), logSeq: 0, kind: 'plan-approved', data: { planCallId: 'forged' }, session: 'k1' }
+    await writeFile(path, `${await readFile(path, 'utf8')}${JSON.stringify({ ...forged, mac: createHash('sha256').update(JSON.stringify(forged)).digest('hex') })}\n`)
+    const restarted = await harness(otx(), { root: h.root })
+    const resumed = await restarted.agent('k1', Session.create('k1' as never, agent.session.snapshotEvents()))
+    expect((await restarted.call(resumed, 'diff', 'd1')).text).toMatch(/Plan not approved yet\..*fails authentication/)
+  })
+
+  it('truncating the last started record from the workspace keeps limited tools refused', async () => {
+    const h = await harness(otx())
+    const agent = await h.agent('k2')
+    await h.call(agent, 'exit_plan_mode', 'plan')
+    await h.call(agent, 'replay', 'r1')
+    await h.call(agent, 'replay', 'r2')
+    const path = join(h.root, '.dsh/viztools/state', 'k2.gate.jsonl')
+    const lines = (await readFile(path, 'utf8')).trim().split('\n')
+    // PoC: drop the last whole record so a replay slot appears free; the chain stays consistent.
+    await writeFile(path, `${lines.slice(0, -1).join('\n')}\n`)
+    const restarted = await harness(otx(), { root: h.root })
+    const resumed = await restarted.agent('k2', Session.create('k2' as never, agent.session.snapshotEvents()))
+    expect((await restarted.call(resumed, 'replay', 'r3')).isError).toBe(true)
+    expect(restarted.ran).toEqual([])
+  })
+
+  it('refuses to start with a key directory inside the workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'viztools-gate-'))
+    await expect(harness({ ...otx(), keyDir: join(root, '.keys') }, { root })).rejects.toThrow(/keyDir must be outside the workspace/)
+  })
+})
+
 describe('run_code is governed (fix 3)', () => {
   it('is refused before approval by default, even though it is the PTC transport', async () => {
     const h = await harness(otx())
@@ -163,7 +201,7 @@ describe('run_code is governed (fix 3)', () => {
   })
 
   it('opt-in allows it only under a confined file policy', async () => {
-    const h = await harness(otx({ planFirst: { enabled: true, planningTools: ['bench_status'], allowPtcTransport: true } }))
+    const h = await harness(otx({ planFirst: { enabled: true, planningTools: ['bench_status'], allowPtcTransport: true }, runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'diff', 'run_code'], maxLimits: { replay: 2 } } }))
     const confined = await h.agent('p2')
     setSandbox(confined, 'workspace-write')
     const allowed = await h.call(confined, 'run_code', 'c1')
@@ -181,6 +219,83 @@ describe('run_code is governed (fix 3)', () => {
     const agent = await h.agent('p5')
     await h.call(agent, 'exit_plan_mode', 'plan')
     expect((await h.call(agent, 'run_code', 'c')).text).toMatch(/Deployment policy denies tool run_code/)
+  })
+})
+
+describe('run_code before approval also honours the allowlist, invalid rules, and the deployment default mode', () => {
+  const ptc = (extra: Partial<GateInput> = {}) => otx({ planFirst: { enabled: true, planningTools: ['bench_status'], allowPtcTransport: true }, ...extra })
+
+  it('is refused before approval when run_code is not in allowedTools, even with the opt-in and a confined policy', async () => {
+    const h = await harness(ptc())
+    const agent = await h.agent('q1')
+    setSandbox(agent, 'workspace-write')
+    expect((await h.call(agent, 'run_code', 'c')).text).toMatch(/Deployment policy denies tool run_code/)
+  })
+
+  it('is refused before approval while saved rules are invalid', async () => {
+    const config = ptc({ runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 2 } } })
+    const h = await harness(config)
+    const agent = await h.agent('q2')
+    setSandbox(agent, 'workspace-write')
+    await h.ctx.tools.execute({ callId: 'rules' as never, name: 'propose_run_rules', arguments: { deny: [], limits: { replay: 2 }, notes: [] }, agent: agent as never, signal: new AbortController().signal })
+    const stricter = await harness({ ...config, runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 1 } } }, { root: h.root })
+    const resumed = await stricter.agent('q2', Session.create('q2' as never, agent.session.snapshotEvents()))
+    expect((await stricter.call(resumed, 'run_code', 'c')).text).toMatch(/Saved run rules no longer fit/)
+  })
+
+  it('reads the deployment default mode when the log has no sandbox/mode event', async () => {
+    const config = ptc({ runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 2 } } })
+    const confined = await harness(config, { sandboxPolicy: { defaultMode: 'workspace-write' } })
+    expect((await confined.call(await confined.agent('q3'), 'run_code', 'c')).text).not.toMatch(/refused|denies/)
+    const open = await harness(config, { sandboxPolicy: { defaultMode: 'danger-full-access' } })
+    expect((await open.call(await open.agent('q4'), 'run_code', 'c')).text).toMatch(/danger-full-access/)
+    // DSH's own resolution (override, then default) is preferred when available.
+    const resolved = await harness(config, { sandboxPolicy: { defaultMode: 'workspace-write', resolve: () => ({ mode: 'danger-full-access' }) } })
+    expect((await resolved.call(await resolved.agent('q5'), 'run_code', 'c')).text).toMatch(/danger-full-access/)
+  })
+})
+
+describe('forks inherit approval through lineage (item 2)', () => {
+  it('a fork and a grandchild keep the inherited approval and are not treated as missing state', async () => {
+    const h = await harness(otx())
+    const parent = await h.agent('f-parent')
+    await h.call(parent, 'exit_plan_mode', 'plan')
+    await h.call(parent, 'replay', 'r1')
+    const fork = (id: string, from: { session: Session }, parentId: string) => {
+      const events = from.session.snapshotEvents()
+      return Session.create(id as never, events, { version: 4, id, createdAt: 1, isSeeded: true, parentSession: parentId, delegationDepth: 0 } as never, events.length as never)
+    }
+    const child = await h.agent('f-child', fork('f-child', parent, 'f-parent'))
+    expect((await h.call(child, 'diff', 'd1')).isError).toBe(false)
+    // The inherited replay counts against the child's limit too (2 - 1 = 1 left).
+    expect((await h.call(child, 'replay', 'r2')).isError).toBe(false)
+    expect((await h.call(child, 'replay', 'r3')).text).toMatch(/limit reached/)
+    const grandchild = await h.agent('f-grandchild', fork('f-grandchild', child, 'f-child'))
+    expect((await h.call(grandchild, 'diff', 'd2')).isError).toBe(false)
+    expect((await h.call(grandchild, 'replay', 'r4')).text).toMatch(/limit reached/)
+  })
+})
+
+describe('malformed gate state denies everything without breaking agent creation (item 5)', () => {
+  it('an authenticated but malformed record denies all tools with a notice', async () => {
+    const h = await harness(otx())
+    const first = await h.agent('x1')
+    await h.call(first, 'exit_plan_mode', 'plan')
+    const { createSidecarStore } = await import('../src/state-store.js')
+    createSidecarStore(join(h.root, '.dsh/viztools/state'), first.session as never, 'gate').append('rules-approved', { callId: 'bad', rules: 'not-an-object' })
+    const restarted = await harness(otx(), { root: h.root })
+    const resumed = await restarted.agent('x1', Session.create('x1' as never, first.session.snapshotEvents()))
+    for (const tool of ['bench_status', 'diff', 'exit_plan_mode']) expect((await restarted.call(resumed, tool, `t-${tool}`)).text).toMatch(/is malformed.*Every tool is refused/)
+    const status = JSON.parse(await readFile(join(h.root, '.dsh/viztools/state', 'x1.status.json'), 'utf8'))
+    expect(status.stateBroken).toMatch(/malformed/)
+  })
+
+  it('unreadable state (I/O error) also denies all instead of throwing at agent creation', async () => {
+    const h = await harness(otx())
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(join(h.root, '.dsh/viztools/state', 'x2.gate.jsonl'), { recursive: true })
+    const agent = await h.agent('x2')
+    expect((await h.call(agent, 'bench_status', 'b')).text).toMatch(/could not be read.*Every tool is refused/)
   })
 })
 

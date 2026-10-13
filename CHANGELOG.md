@@ -4,6 +4,27 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — follow-up on a751b39 (2026-10-13, all reproduced with PoCs)
+
+- **HIGH: the sidecar chain is now keyed and anchored outside the workspace.** Records carry an HMAC-SHA256 chained to the previous MAC. The key is in `<keyDir>/sidecar.key` (0600; default `$DSH_HOME/viztools`; a `keyDir` inside the workspace is rejected). A MAC'd anchor (`<keyDir>/anchors/<session>.<channel>.json`, replaced atomically after each append) records the last index, its MAC, and lineage. PoCs now fail closed: a forged unkeyed approval appended from the workspace, whole-record tail truncation, a deleted sidecar, and a tampered or missing anchor. A torn final line from a crash, or a MAC-valid record beyond the anchor, is accepted. `THREAT_MODEL.md` is corrected: the a751b39 chain was unkeyed.
+- **Forks:** a fork's inherited approval and counts are honoured through lineage instead of counting as missing state. Lineage is recursive: grandchildren see ancestor records up to each fork point, with lineage recorded in the anchor.
+- **`run_code` before approval** now also requires membership in `runRules.allowedTools` and is refused while saved rules are invalid. When the log has no `sandbox/mode` event, the file policy comes from DSH's `sandboxPolicy` (its own resolution, else `defaultMode`).
+- **Repair:**
+  - takes DSH's `session.lock` lease (non-blocking `flock(2)` via DSH's addon or `flock(1)`) for each session, and refuses sessions DSH still holds;
+  - writes through unique, exclusively created temp files fsync'd before the rename, so a planted temp-name symlink can no longer redirect the write;
+  - uses unique backup names and fsyncs them;
+  - does not re-export a fork's inherited legacy events (before its `session/end-seed` cut), and records the fork's lineage;
+  - `repairSessions` is now async.
+- **A malformed but authentic record, or unreadable state, denies every tool** with a notice in the refusal, the status file, and the viewer. It no longer crashes agent creation.
+- **Config:** new optional `keyDir` for the gate and the report; `--key-dir` for the repair.
+- **Tests:**
+  - `state-store`: forged append, tail truncation, deleted sidecar, tampered or missing anchor, crash window, torn line, reset, recursive lineage, `keyDir` placement;
+  - `gate-runtime`: forged approval and truncation PoCs through the real `ToolRuntime`, fork and grandchild approval, run_code allowlist/invalid-rules/deployment default, malformed and unreadable state;
+  - `repair`: held lease, planted temp symlink, fork inherited events;
+  - integration: the repair is refused while the live console holds the session.
+
+  Vitest now isolates `DSH_HOME` in a temp dir.
+
 ### Security — real OTX console findings (2026-10-13)
 
 Found while running the plugin on the real OTX console (DSH 0.2.0-rc.2, Fedora VM, real GM E86 run). DSH rc.2 compatibility is kept.

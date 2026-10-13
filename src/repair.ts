@@ -1,10 +1,11 @@
-import { execFileSync } from 'node:child_process'
-import { copyFileSync, existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { execFileSync, spawn } from 'node:child_process'
+import { closeSync, constants, copyFileSync, existsSync, fsyncSync, openSync, readdirSync, readFileSync, renameSync, writeSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
 import { basename, dirname, join, resolve } from 'node:path'
 import { decodeGateChange } from './gate-domain.js'
 import { isSafeSessionId } from './managed-state.js'
 import { decodeRunRulesChange } from './run-rules.js'
-import { createSidecarStore, type JsonValue, type StoreChannel } from './state-store.js'
+import { createSidecarStore, loadKeyring, type JsonValue, type Keyring, type StoreChannel } from './state-store.js'
 
 /**
  * Repair DSH session logs written by dsh-viztools <= ca3b3ca.
@@ -35,6 +36,10 @@ export interface RepairOptions {
   readonly dryRun: boolean
   /** zstd executable for `.jsonl.zstd` logs. */
   readonly zstd?: string
+  /** Key directory for the sidecar HMAC chain and anchors (default `<dshHome>/viztools`). */
+  readonly keyDir?: string
+  /** Acquire DSH's session write lease; injectable for tests. */
+  readonly lease?: (sessionDir: string) => Promise<SessionLease>
   readonly now?: () => number
 }
 
@@ -46,6 +51,66 @@ export interface RepairedSession {
   readonly exported: { readonly gate: number; readonly report: number; readonly skipped?: string }
   readonly backup?: string
   readonly error?: string
+  /** Legacy events inside a fork's inherited prefix: marked ignorable but not re-exported. */
+  readonly inherited?: number
+}
+
+export interface SessionLease {
+  release(): Promise<void>
+}
+
+export class SessionLeaseHeldError extends Error {
+  constructor(dir: string) {
+    super(`DSH holds the session lease (${join(dir, 'session.lock')}); stop every DSH process using this home before repairing`)
+  }
+}
+
+function fsyncPath(path: string): void {
+  try { const fd = openSync(path, 'r'); try { fsyncSync(fd) } finally { closeSync(fd) } } catch { /* directories cannot be fsync'd everywhere */ }
+}
+
+/**
+ * Take the same kernel lease DSH uses: a non-blocking exclusive flock(2) on
+ * `<session>/session.lock`, held for the whole repair. DSH's own native addon is used when it
+ * is resolvable; otherwise the util-linux `flock` command holds the lock in a child process.
+ * When the lease is held by DSH, or cannot be taken at all, the session is refused.
+ */
+export async function acquireSessionLease(sessionDir: string, flockCommand = 'flock'): Promise<SessionLease> {
+  const lockPath = join(sessionDir, 'session.lock')
+  try {
+    const addon = await import('@deepseek-ai/node-addon-system/flock' as string) as { tryLockExclusive?: (fd: number) => Promise<void> }
+    if (typeof addon.tryLockExclusive === 'function') {
+      const fd = openSync(lockPath, constants.O_WRONLY | constants.O_CREAT, 0o600)
+      try {
+        await addon.tryLockExclusive(fd)
+      } catch (error) {
+        closeSync(fd)
+        const code = (error as NodeJS.ErrnoException).code
+        if (code === 'EAGAIN' || code === 'EWOULDBLOCK') throw new SessionLeaseHeldError(sessionDir)
+        throw error
+      }
+      return { release: async () => { closeSync(fd) } }
+    }
+  } catch (error) {
+    if (error instanceof SessionLeaseHeldError) throw error
+    /* addon not resolvable from this install: use the flock command */
+  }
+  return await new Promise<SessionLease>((resolvePromise, reject) => {
+    const child = spawn(flockCommand, ['--nonblock', '--conflict-exit-code', '75', lockPath, '-c', 'printf LOCKED; exec cat >/dev/null'], { stdio: ['pipe', 'pipe', 'ignore'] })
+    let settled = false
+    child.once('error', (error) => { if (!settled) { settled = true; reject(new Error(`cannot take the DSH session lease without flock(2) support: ${error.message}`)) } })
+    child.once('exit', (code) => { if (!settled) { settled = true; reject(code === 75 ? new SessionLeaseHeldError(sessionDir) : new Error(`flock exited ${code} while taking the session lease`)) } })
+    child.stdout.once('data', () => {
+      if (settled) return
+      settled = true
+      resolvePromise({
+        release: async () => {
+          if (child.exitCode !== null) return
+          await new Promise<void>((done) => { child.once('exit', () => done()); child.stdin.end() })
+        },
+      })
+    })
+  })
 }
 
 type RawEvent = Record<string, unknown> & { type?: unknown; seq?: unknown; data?: unknown; ignorable?: unknown }
@@ -74,17 +139,28 @@ function readLog(path: string, zstd: string): string {
  * its session lister decodes just that frame. Preserve the layout: header frame, then events.
  */
 function writeLog(path: string, text: string, zstd: string): void {
-  const temporary = `${path}.viztools-repair-tmp`
+  let contents: Buffer
   if (path.endsWith('.zstd')) {
     const newline = text.indexOf('\n')
     const header = newline < 0 ? text : text.slice(0, newline + 1)
     const rest = newline < 0 ? '' : text.slice(newline + 1)
     const frame = (input: string): Buffer => execFileSync(zstd, ['-q', '-c', '-'], { input, maxBuffer: 1 << 30 })
-    writeFileSync(temporary, rest === '' ? frame(header) : Buffer.concat([frame(header), frame(rest)]), { mode: 0o600 })
+    contents = rest === '' ? frame(header) : Buffer.concat([frame(header), frame(rest)])
   } else {
-    writeFileSync(temporary, text, { mode: 0o600 })
+    contents = Buffer.from(text, 'utf8')
+  }
+  // Unique, exclusively created temp file (never follows a planted name), fsync'd before the
+  // rename, then the directory entry is fsync'd too.
+  const temporary = `${path}.viztools-repair-${process.pid}-${randomBytes(8).toString('hex')}`
+  const fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+  try {
+    writeSync(fd, contents)
+    fsyncSync(fd)
+  } finally {
+    closeSync(fd)
   }
   renameSync(temporary, path)
+  fsyncPath(dirname(path))
 }
 
 interface Exported { channel: StoreChannel; kind: string; data: { [key: string]: JsonValue }; logSeq: number }
@@ -122,44 +198,61 @@ function sessionIdOf(path: string, header: RawEvent | undefined): string {
   return typeof header?.id === 'string' ? header.id : basename(dirname(path))
 }
 
-export function repairSessions(options: RepairOptions): RepairedSession[] {
+export async function repairSessions(options: RepairOptions): Promise<RepairedSession[]> {
   const zstd = options.zstd ?? 'zstd'
   const now = options.now ?? Date.now
   const stateRoot = resolve(options.workspace, options.stateDir ?? '.dsh/viztools/state')
+  const lease = options.lease ?? ((dir: string) => acquireSessionLease(dir))
+  let keyring: Keyring | undefined
   const results: RepairedSession[] = []
   for (const log of findLogs(join(resolve(options.dshHome), 'sessions'))) {
     let sessionId = basename(dirname(log))
+    let held: SessionLease | undefined
     try {
-      const text = readLog(log, zstd)
+      const preview = readLog(log, zstd)
+      const previewHeader = (() => { try { return JSON.parse(preview.slice(0, preview.indexOf('\n'))) as RawEvent } catch { return undefined } })()
+      sessionId = sessionIdOf(log, previewHeader?.type === 'session' ? previewHeader : undefined)
+      if (options.sessions !== undefined && !options.sessions.includes(sessionId)) continue
+      if (!options.dryRun) held = await lease(dirname(log))
+      // Re-read under the lease: DSH may have appended before it stopped.
+      const text = options.dryRun ? preview : readLog(log, zstd)
       const lines = text.split('\n')
       const parsed: (RawEvent | undefined)[] = lines.map((line) => { if (line.trim() === '') return undefined; try { return JSON.parse(line) as RawEvent } catch { return undefined } })
       const header = parsed[0]?.type === 'session' ? parsed[0] : undefined
-      sessionId = sessionIdOf(log, header)
-      if (options.sessions !== undefined && !options.sessions.includes(sessionId)) continue
       const legacy = parsed.flatMap((event, index) => event !== undefined && LEGACY_EVENT_TYPES.has(String(event.type)) && event.ignorable !== true ? [index] : [])
       if (legacy.length === 0) { results.push({ sessionId, log, legacyEvents: 0, action: 'clean', exported: { gate: 0, report: 0 } }); continue }
       if (!isSafeSessionId(sessionId)) throw new Error(`unsafe session id ${sessionId}`)
 
-      const records = legacy.map((index) => legacyRecord(parsed[index] as RawEvent)).filter((record): record is Exported => record !== undefined)
+      // A fork's log repeats its parent's events up to the last `session/end-seed {inherited}`.
+      // Those legacy events belong to the parent's sidecar (inherited through lineage), so they
+      // are marked ignorable here but never exported again into the child.
+      const parent = header?.isSeeded === true && typeof header.parentSession === 'string' ? header.parentSession : undefined
+      const cutSeq = parent === undefined ? 0 : Math.max(0, ...parsed.filter((event) => event?.type === 'session/end-seed' && (event.data as { inherited?: unknown } | undefined)?.inherited === true).map((event) => Number(event?.seq)))
+      const own = legacy.filter((index) => Number((parsed[index] as RawEvent).seq) >= cutSeq)
+      const inherited = legacy.length - own.length
+      const records = own.map((index) => legacyRecord(parsed[index] as RawEvent)).filter((record): record is Exported => record !== undefined)
       const counts = { gate: records.filter((record) => record.channel === 'gate').length, report: records.filter((record) => record.channel === 'report').length }
       const existing = (['gate', 'report'] as const).filter((channel) => existsSync(join(stateRoot, `${sessionId}.${channel}.jsonl`)))
       const skipped = existing.length > 0 ? `sidecar already exists for ${existing.join(', ')}; not re-imported` : undefined
+      const extra = { ...(inherited > 0 ? { inherited } : {}) }
       if (options.dryRun) {
-        results.push({ sessionId, log, legacyEvents: legacy.length, action: 'would-convert', exported: { ...counts, ...(skipped === undefined ? {} : { skipped }) } })
+        results.push({ sessionId, log, legacyEvents: legacy.length, action: 'would-convert', exported: { ...counts, ...(skipped === undefined ? {} : { skipped }) }, ...extra })
         continue
       }
 
-      const stamp = now()
-      const backup = `${log}.viztools-backup-${stamp}`
-      copyFileSync(log, backup)
+      const backup = `${log}.viztools-backup-${now()}-${randomBytes(4).toString('hex')}`
+      copyFileSync(log, backup, constants.COPYFILE_EXCL)
+      fsyncPath(backup)
       // The projection cache is deliberately left in place: DSH lists sessions from it, it is
       // keyed by sequence numbers only, and this repair preserves every seq and changes no
       // event that a DSH projection reads. Moving it aside hides the session from the UI.
 
-      if (skipped === undefined) {
-        // Export with the original log positions so fork lineage cuts stay meaningful.
-        const fake = { id: sessionId, seq: 0, header: {}, inheritedEventCount: 0, snapshotEvents: () => [] }
-        const stores = { gate: createSidecarStore(stateRoot, fake, 'gate'), report: createSidecarStore(stateRoot, fake, 'report') }
+      if (skipped === undefined && (records.length > 0 || parent !== undefined)) {
+        keyring ??= loadKeyring(options.keyDir ?? join(resolve(options.dshHome), 'viztools'))
+        // Export with the original log positions and the fork lineage, keyed and anchored.
+        const fake = { id: sessionId, seq: 0, header: parent === undefined ? {} : { isSeeded: true, parentSession: parent }, inheritedEventCount: cutSeq, snapshotEvents: () => [] }
+        const stores = { gate: createSidecarStore(stateRoot, fake, 'gate', keyring), report: createSidecarStore(stateRoot, fake, 'report', keyring) }
+        if (parent !== undefined) { stores.gate.read(); stores.report.read() }
         for (const record of records) { fake.seq = record.logSeq; stores[record.channel].append(record.kind, record.data) }
       }
       for (const index of legacy) {
@@ -167,9 +260,11 @@ export function repairSessions(options: RepairOptions): RepairedSession[] {
         lines[index] = JSON.stringify({ ...event, ignorable: true })
       }
       writeLog(log, lines.join('\n'), zstd)
-      results.push({ sessionId, log, legacyEvents: legacy.length, action: 'converted', backup, exported: { ...counts, ...(skipped === undefined ? {} : { skipped }) } })
+      results.push({ sessionId, log, legacyEvents: legacy.length, action: 'converted', backup, exported: { ...counts, ...(skipped === undefined ? {} : { skipped }) }, ...extra })
     } catch (error) {
       results.push({ sessionId, log, legacyEvents: 0, action: 'failed', exported: { gate: 0, report: 0 }, error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      await held?.release()
     }
   }
   return results

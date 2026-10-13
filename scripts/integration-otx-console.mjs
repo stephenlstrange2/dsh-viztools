@@ -255,6 +255,11 @@ try {
 
   // Restart. First simulate a session written by an older dsh-viztools: inject a legacy,
   // non-ignorable viztools-* event (rc.2 refuses such logs) and repair it with the CLI.
+  // While DSH still holds the session lease, the repair must refuse to touch the log.
+  const repairCliLive = join(repo, 'bin', 'dsh-viztools-repair.mjs')
+  let refusedWhileLive = ''
+  try { execFileSync(process.execPath, [repairCliLive, '--dsh-home', home, '--workspace', workspace, '--session', sessionId], { stdio: ['ignore', 'pipe', 'pipe'] }) } catch (error) { refusedWhileLive = String(error.stdout ?? '') }
+  check('repair refuses a session DSH still holds (session.lock lease)', /DSH holds the session lease/.test(refusedWhileLive), refusedWhileLive.trim().split('\n')[0])
   await browser.close(); browser = undefined
   await stopDsh(dsh)
   const liveRecords = await readSidecar('gate')

@@ -58,7 +58,7 @@ def load_gate_status(session: str, root: Path | None = None) -> list[str]:
         return []
     if not isinstance(status, dict) or status.get("sessionId") != session:
         return []
-    return [str(status[key]) for key in ("planNotice", "stateNotice", "countsUntrusted", "rulesInvalid") if isinstance(status.get(key), str) and status.get(key)]
+    return [str(status[key]) for key in ("stateBroken", "planNotice", "stateNotice", "countsUntrusted", "rulesInvalid") if isinstance(status.get(key), str) and status.get(key)]
 
 
 def _pending(session: str) -> dict[str, Any]:

@@ -35,6 +35,8 @@ export interface GatePolicyInput {
   readonly rules?: RunRules
   /** Saved rules could not be honoured: every governed tool is refused with this reason. */
   readonly rulesInvalid?: string
+  /** Gate state cannot be interpreted at all: every tool, including control tools, is refused. */
+  readonly stateBroken?: string
   /** Counts cannot be trusted: tools with limits are refused with this reason. */
   readonly countsUntrusted?: string
   /** Started (durable) plus reserved (in-flight) calls per tool. */
@@ -46,7 +48,7 @@ export interface GatePolicyInput {
 }
 
 export interface GateDenial {
-  readonly code: 'GATE_STATE_UNAVAILABLE' | 'PLAN_NOT_APPROVED' | 'DEPLOYMENT_TOOL_DENIED' | 'RUN_RULE_DENIED' | 'RUN_RULE_LIMIT' | 'RUN_RULES_INVALID' | 'COUNTS_UNTRUSTED' | 'DELEGATION_DENIED' | 'PTC_TRANSPORT_DENIED'
+  readonly code: 'GATE_STATE_UNAVAILABLE' | 'GATE_STATE_MALFORMED' | 'PLAN_NOT_APPROVED' | 'DEPLOYMENT_TOOL_DENIED' | 'RUN_RULE_DENIED' | 'RUN_RULE_LIMIT' | 'RUN_RULES_INVALID' | 'COUNTS_UNTRUSTED' | 'DELEGATION_DENIED' | 'PTC_TRANSPORT_DENIED'
   readonly reason: string
   readonly count?: number
   readonly limit?: number
@@ -61,6 +63,7 @@ export function effectiveLimit(tool: string, deploymentLimits: Readonly<Record<s
 
 export function decideTool(input: GatePolicyInput): GateDenial | undefined {
   if (!input.knownAgent) return { code: 'GATE_STATE_UNAVAILABLE', reason: 'Plan gate state is unavailable; refusing tool execution.' }
+  if (input.stateBroken !== undefined) return { code: 'GATE_STATE_MALFORMED', reason: `${input.stateBroken}. Every tool is refused for this session; ask the operator to inspect the dsh-viztools state.` }
   if (input.controlTools?.has(input.tool) === true) return undefined
   if (DELEGATION_TOOLS.has(input.tool) && input.delegationAllowed !== true) {
     return { code: 'DELEGATION_DENIED', reason: `Delegation (${input.tool}) is disabled while the dsh-viztools gate governs this session: child agents would escape its plan approval and limits.` }
@@ -74,11 +77,11 @@ export function decideTool(input: GatePolicyInput): GateDenial | undefined {
       return { code: 'PLAN_NOT_APPROVED', reason: input.planNotice === undefined ? base : `${base} ${input.planNotice}` }
     }
   }
+  // run_code included: before approval it additionally needed the opt-in above, and it is
+  // never exempt from the deployment allowlist or invalid-rule refusal.
   const deploymentRestricted = input.deploymentRestricted ?? true
-  // The PTC transport is gated above before approval; afterwards it is governed like any tool.
-  const ptcExempt = input.tool === RUN_CODE && planFirst && !input.planApproved
-  if (deploymentRestricted && !ptcExempt && !input.deploymentAllowed.has(input.tool)) return { code: 'DEPLOYMENT_TOOL_DENIED', reason: `Deployment policy denies tool ${input.tool}.` }
-  if (input.rulesInvalid !== undefined && !ptcExempt) {
+  if (deploymentRestricted && !input.deploymentAllowed.has(input.tool)) return { code: 'DEPLOYMENT_TOOL_DENIED', reason: `Deployment policy denies tool ${input.tool}.` }
+  if (input.rulesInvalid !== undefined) {
     return { code: 'RUN_RULES_INVALID', reason: `${input.rulesInvalid}; every governed tool is refused until new run rules are approved with propose_run_rules.` }
   }
   // `allow` absent means "no session allowlist" (deployment ceiling only); an empty list denies every tool.

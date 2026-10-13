@@ -10,19 +10,22 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 
 ## Automated evidence (2026-10-13)
 
-`pnpm check`: 118 TypeScript tests and 31 Python tests pass. `pnpm test:integration` (real DSH 0.2.0-rc.2 web, OTX topology, mock LLM, late-registering MCP fixture, headless Chromium at 1910×916, restart + resume + repair): **41/41 checks pass**.
+`pnpm check`: 133 TypeScript tests and 31 Python tests pass. `pnpm test:integration` (real DSH 0.2.0-rc.2 web, OTX topology, mock LLM, late-registering MCP fixture, headless Chromium at 1910×916, restart + resume + repair + live-lease refusal): **42/42 checks pass**.
 
 ### Durable state and restart
 
 - [x] No custom (non-ignorable) event types are written into `session.jsonl`. This is enforced at compile time (no `SessionEventMap` augmentation) and checked in integration.
 - [x] Sessions reopen after a DSH restart and accept a new turn. Resumed counts equal live counts, and the resumed gate refuses at the limit (integration).
-- [x] On rc.2: per-session sidecar, append-only, fsync'd per record, mode 0600, index plus SHA-256 hash chain, fork lineage up to the fork point. With `appendPluginRecord`: ignorable `plugin:dsh-viztools/*` records, detected at runtime.
+- [x] On rc.2: per-session sidecar, append-only, fsync'd per record, mode 0600. With `appendPluginRecord`: ignorable `plugin:dsh-viztools/*` records, detected at runtime.
+- [x] Integrity is keyed: an HMAC-SHA256 chain with its key outside the workspace (`$DSH_HOME/viztools/sidecar.key`, 0600; a `keyDir` inside the workspace is rejected), plus a MAC'd out-of-workspace anchor (head and lineage). PoCs fail closed: forged unkeyed approval, whole-record tail truncation, deleted sidecar, tampered or missing anchor. *(The a751b39 chain was unkeyed; corrected.)*
+- [x] Forks honour inherited approval and counts through recursive lineage (grandchildren included).
+- [x] A malformed but authentic record, or unreadable state, denies every tool with a notice; agent creation never crashes.
 - [x] Fail closed: a missing (with gated activity in the log), truncated, or edited sidecar means no plan approval, saved rules refused until re-approved, and limited tools refused for the session. A completed limited call without a recorded decision also makes counts untrusted.
-- [x] `dsh-viztools-repair`: dry-run, backups, in-place `ignorable` conversion with sequence numbers preserved, state export, DSH's zstd frame layout kept, projection cache left in place. Validated with rc.2's own `validateStoredEvents` and by a real DSH reopen in integration.
+- [x] `dsh-viztools-repair`: dry-run, unique fsync'd backups, in-place `ignorable` conversion with sequence numbers preserved, keyed state export, DSH's zstd frame layout kept, projection cache left in place. It takes DSH's `session.lock` lease (and is refused while a live DSH holds it, in integration), writes through unique exclusive temp files fsync'd before rename, and never re-exports a fork's inherited events. Validated with rc.2's own `validateStoredEvents` and by a real DSH reopen in integration.
 
 ### Policy
 
-- [x] `run_code` is refused before approval unless `planFirst.allowPtcTransport` is set AND the file policy is confined; after approval it is governed like any tool (`THREAT_MODEL.md`).
+- [x] `run_code` is refused before approval unless `planFirst.allowPtcTransport` is set AND the effective file policy is confined (session override, else the `sandboxPolicy` deployment default); even then it must be in `allowedTools` and is refused while rules are invalid. After approval it is governed like any tool (`THREAT_MODEL.md`).
 - [x] Invalid saved rules fail closed: every governed tool is refused, with a `rules-invalidated` audit record. They never fall back to the deployment allowlist.
 - [x] Delegation is refused while the gate is active unless `delegation.allow`. With the opt-in, children share the parent's approval, rules, and counts. Unattachable children get no fresh budget.
 - [x] Not counted: aborts after the reservation but before the body, and tools that don't exist. Failed audit writes are retried and queued, and the call stays refused.
@@ -41,7 +44,7 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 - [ ] Re-run on the real OTX console (Fedora VM) with real OTX tools: restart and reopen a gated session, and confirm the report fills the sidebar.
 - [ ] Run `dsh-viztools-repair --dry-run`, then the real repair, on the existing console DSH home (stop all consoles first), and confirm the old sessions open.
 - [ ] Approve rules in the real Client UI and capture refusal/limit evidence.
-- [ ] Confirm internal `check-dsh-profile.py` enforces every item in `THREAT_MODEL.md` (including `allowPtcTransport`, `delegation.allow`, and matching state directories).
+- [ ] Confirm internal `check-dsh-profile.py` enforces every item in `THREAT_MODEL.md` (including `allowPtcTransport`, `delegation.allow`, matching state directories, and a `keyDir` outside the agent's writable paths).
 - [ ] Review and checksum the deployment's OTX report template.
 - [ ] Validate the Phase F Podman image with networking disabled. The static export loads marimo frontend assets; confirm they render with networking off.
 - [ ] Confirm that report and sidecar file permissions and retention satisfy internal policy.

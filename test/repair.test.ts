@@ -8,8 +8,8 @@ import { join } from 'node:path'
 import { validateStoredEvents } from '@deepseek-ai/dsh-session-persistence'
 import { describe, expect, it } from 'vitest'
 import { foldGateRecords } from '../src/gate-state.js'
-import { repairSessions } from '../src/repair.js'
-import { createSidecarStore } from '../src/state-store.js'
+import { acquireSessionLease, repairSessions } from '../src/repair.js'
+import { createSidecarStore, loadKeyring } from '../src/state-store.js'
 
 const id = 'session-11111111-2222-3333-4444-555555555555'
 
@@ -58,7 +58,7 @@ describe('dsh-viztools-repair', () => {
   it('dry-run reports but writes nothing', async () => {
     const h = await home(false)
     const before = await readFile(h.log, 'utf8')
-    const [result] = repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: true })
+    const [result] = await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: true })
     expect(result).toMatchObject({ sessionId: id, legacyEvents: 5, action: 'would-convert', exported: { gate: 4, report: 1 } })
     expect(await readFile(h.log, 'utf8')).toBe(before)
     expect(existsSync(join(h.workspace, '.dsh/viztools/state'))).toBe(false)
@@ -68,9 +68,12 @@ describe('dsh-viztools-repair', () => {
   it('backs up, converts in place (seq preserved), exports state, and DSH then accepts the log', async () => {
     const h = await home(false)
     const before = await readFile(h.log, 'utf8')
-    const [result] = repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false, now: () => 42 })
+    const [result] = await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false, now: () => 42 })
     expect(result).toMatchObject({ action: 'converted', legacyEvents: 5 })
-    expect(await readFile(`${h.log}.viztools-backup-42`, 'utf8')).toBe(before)
+    const backups = (await readdir(h.dir)).filter((name) => name.startsWith('session.v4.jsonl.viztools-backup-42-'))
+    expect(backups).toHaveLength(1)
+    expect(await readFile(join(h.dir, backups[0] as string), 'utf8')).toBe(before)
+    expect((await readdir(h.dir)).some((name) => name.includes('viztools-repair-'))).toBe(false)
     // DSH lists sessions from the projection cache; the repair must leave it in place.
     expect(existsSync(join(h.dshHome, 'storages', 'session_projcache', 'sessions', `${id}.json`))).toBe(true)
     const repaired = events(await readFile(h.log, 'utf8'))
@@ -78,17 +81,17 @@ describe('dsh-viztools-repair', () => {
     expect(repaired.filter((event) => String(event.type).startsWith('viztools')).every((event) => event.ignorable === true)).toBe(true)
     expect(() => validateStoredEvents({ id, version: 4 } as never, repaired, h.log as never)).not.toThrow()
     const fake = { id, seq: 0, header: {}, inheritedEventCount: 0, snapshotEvents: () => [] }
-    const fold = foldGateRecords(createSidecarStore(join(h.workspace, '.dsh/viztools/state'), fake, 'gate').read().records)
+    const fold = foldGateRecords(createSidecarStore(join(h.workspace, '.dsh/viztools/state'), fake, 'gate', loadKeyring(join(h.dshHome, 'viztools'))).read().records)
     expect(fold).toMatchObject({ approved: true, counts: { mcp__otx__replay_tx_only: 1 } })
     expect(fold.rules?.allow).toBeUndefined()
     expect(fold.refusals[0]).toMatchObject({ code: 'PLAN_NOT_APPROVED', beforeApproval: true })
     // Idempotent: a second run finds nothing to do.
-    expect(repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })[0]?.action).toBe('clean')
+    expect((await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false }))[0]?.action).toBe('clean')
   })
 
   it.skipIf(!zstdAvailable)('repairs zstd-compressed v4 logs', async () => {
     const h = await home(true)
-    const [result] = repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })
+    const [result] = await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })
     expect(result?.action).toBe('converted')
     const repaired = events(execFileSync('zstd', ['-dc', h.log]).toString('utf8'))
     expect(() => validateStoredEvents({ id, version: 4 } as never, repaired, h.log as never)).not.toThrow()
@@ -101,9 +104,59 @@ describe('dsh-viztools-repair', () => {
   it('does not re-import when a sidecar already exists', async () => {
     const h = await home(false)
     const fake = { id, seq: 0, header: {}, inheritedEventCount: 0, snapshotEvents: () => [] }
-    createSidecarStore(join(h.workspace, '.dsh/viztools/state'), fake, 'gate').append('plan-approved', { planCallId: 'existing' })
-    const [result] = repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })
+    createSidecarStore(join(h.workspace, '.dsh/viztools/state'), fake, 'gate', loadKeyring(join(h.dshHome, 'viztools'))).append('plan-approved', { planCallId: 'existing' })
+    const [result] = await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })
     expect(result?.exported.skipped).toMatch(/already exists/)
-    expect(foldGateRecords(createSidecarStore(join(h.workspace, '.dsh/viztools/state'), fake, 'gate').read().records).planCallId).toBe('existing')
+    expect(foldGateRecords(createSidecarStore(join(h.workspace, '.dsh/viztools/state'), fake, 'gate', loadKeyring(join(h.dshHome, 'viztools'))).read().records).planCallId).toBe('existing')
+  })
+
+  it('refuses a session while DSH holds its lease, and repairs it once the lease is free', async () => {
+    const h = await home(false)
+    const before = await readFile(h.log, 'utf8')
+    const dsh = await acquireSessionLease(h.dir)
+    try {
+      const [result] = await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })
+      expect(result).toMatchObject({ action: 'failed', error: expect.stringMatching(/DSH holds the session lease/) })
+      expect(await readFile(h.log, 'utf8')).toBe(before)
+    } finally {
+      await dsh.release()
+    }
+    expect((await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false }))[0]?.action).toBe('converted')
+  })
+
+  it('never follows a planted temp-file symlink (unique, exclusive temp names)', async () => {
+    const h = await home(false)
+    const victim = join(h.root, 'victim.txt')
+    await writeFile(victim, 'untouched')
+    const { symlink } = await import('node:fs/promises')
+    // PoC against the old fixed temp name.
+    await symlink(victim, `${h.log}.viztools-repair-tmp`)
+    expect((await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false }))[0]?.action).toBe('converted')
+    expect(await readFile(victim, 'utf8')).toBe('untouched')
+  })
+
+  it('does not re-export a fork\'s inherited legacy events, and the fork inherits them via lineage', async () => {
+    const h = await home(false)
+    await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false })
+    // The child repeats the parent's six events, then its own cut marker and one own legacy event.
+    const childId = 'session-99999999-2222-3333-4444-555555555555'
+    const parentLines = legacyLog().trim().split('\n').slice(1)
+    const childHeader = { type: 'session', version: 4, id: childId, createdAt: 2, cwd: '/w', isSeeded: true, parentSession: id, delegationDepth: 0 }
+    const own = [
+      { type: 'session/end-seed', seq: 6, time: 7, data: { inherited: true } },
+      { type: 'viztools-run-rules/change', seq: 7, time: 8, data: { kind: 'accepted-call', version: 2, callId: 'c-child', tool: 'mcp__otx__replay_tx_only' } },
+    ]
+    const childDir = join(h.dshHome, 'sessions', '--w--', childId)
+    await mkdir(childDir, { recursive: true })
+    await writeFile(join(childDir, 'session.v4.jsonl'), `${[JSON.stringify(childHeader), ...parentLines, ...own.map((event) => JSON.stringify(event))].join('\n')}\n`)
+    const results = await repairSessions({ dshHome: h.dshHome, workspace: h.workspace, dryRun: false, sessions: [childId] })
+    expect(results[0]).toMatchObject({ action: 'converted', legacyEvents: 6, inherited: 5, exported: { gate: 1, report: 0 } })
+    const keyring = loadKeyring(join(h.dshHome, 'viztools'))
+    const child = { id: childId, seq: 8, header: { isSeeded: true, parentSession: id }, inheritedEventCount: 6, snapshotEvents: () => [] }
+    const snapshot = createSidecarStore(join(h.workspace, '.dsh/viztools/state'), child, 'gate', keyring).read()
+    expect(snapshot.integrity).toEqual({ status: 'ok' })
+    const fold = foldGateRecords(snapshot.records)
+    expect(fold).toMatchObject({ approved: true, counts: { mcp__otx__replay_tx_only: 2 } })
+    expect(snapshot.records.filter((record) => record.session === childId).map((record) => record.data.callId)).toEqual(['c-child'])
   })
 })

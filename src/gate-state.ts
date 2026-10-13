@@ -30,6 +30,8 @@ export interface GateFold {
   /** Calls with a recorded decision (started, not started, or refused). */
   readonly decided: ReadonlySet<string>
   readonly refusals: readonly GateRefusal[]
+  /** A record passed authentication but could not be interpreted: deny everything. */
+  readonly malformed?: string
 }
 
 export function initialGateFold(): GateFold {
@@ -97,7 +99,14 @@ export function applyGateRecord(state: GateFold, record: Pick<StoredRecord, 'kin
 
 export function foldGateRecords(records: readonly Pick<StoredRecord, 'kind' | 'data' | 't'>[]): GateFold {
   let state = initialGateFold()
-  for (const record of records) state = applyGateRecord(state, record)
+  for (const [index, record] of records.entries()) {
+    try {
+      state = applyGateRecord(state, record)
+    } catch (error) {
+      // Never crash agent creation on bad state; fail closed instead.
+      return { ...state, approved: false, malformed: `gate record #${index} (${String(record.kind)}) is malformed: ${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
   return state
 }
 

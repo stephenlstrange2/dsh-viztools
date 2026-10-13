@@ -10,7 +10,7 @@ import { decideTool, DELEGATION_TOOLS, expandPatterns, RUN_CODE, type GateDenial
 import { applyGateRecord, evaluateTrust, foldGateRecords, type GateFold, type GateRecordKind } from './gate-state.js'
 import { isSafeSessionId } from './managed-state.js'
 import { deploymentFingerprint, rulesValidForDeployment, RUN_RULES_VERSION, type RunRules } from './run-rules.js'
-import { openStateStore, type JsonValue, type PluginRecordApi, type StateStore } from './state-store.js'
+import { assertKeyDirOutside, defaultKeyDir, loadKeyring, openStateStore, type JsonValue, type Keyring, type PluginRecordApi, type StateStore } from './state-store.js'
 
 export { GATE_EVENT_TYPE, decodeGateChange, foldGate, initialGateState } from './gate-domain.js'
 export type { GateChange, GateState } from './gate-domain.js'
@@ -45,6 +45,7 @@ export interface Config {
   delegation?: DelegationConfig
   cwd?: string
   stateDir?: string
+  keyDir?: string
 }
 
 export interface ResolvedConfig {
@@ -64,6 +65,7 @@ export interface ResolvedConfig {
   }
   cwd: string
   stateDir: string
+  keyDir: string
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -83,6 +85,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   }).default({}),
   cwd: z.string().default(''),
   stateDir: z.string().default(DEFAULT_STATE_DIR),
+  keyDir: z.string().default(''),
 })
 
 interface AgentGate {
@@ -118,6 +121,7 @@ function partial(config: GateInput): ResolvedConfig {
     delegation: { allow: false, ...config.delegation },
     cwd: config.cwd ?? '',
     stateDir: config.stateDir ?? DEFAULT_STATE_DIR,
+    keyDir: config.keyDir ?? '',
   }
 }
 
@@ -183,7 +187,15 @@ function warn(ctx: Context, message: string): void {
 }
 
 /** Latest `sandbox/mode` recorded in the session log, if any. */
-export function sessionSandboxMode(agent: Pick<Agent, 'session'>): string | undefined {
+export function sessionSandboxMode(agent: Pick<Agent, 'session'>, policy?: unknown): string | undefined {
+  // Preferred: DSH's own resolution (session override, else the deployment default).
+  const service = policy as { resolve?: (request: { session: unknown }) => { mode?: unknown }; defaultMode?: unknown } | undefined
+  if (typeof service?.resolve === 'function') {
+    try {
+      const mode = service.resolve({ session: agent.session }).mode
+      if (typeof mode === 'string') return mode
+    } catch { /* fall through to the log */ }
+  }
   const events = agent.session.snapshotEvents()
   for (let index = events.length - 1; index >= 0; index--) {
     const event = events[index]
@@ -192,7 +204,8 @@ export function sessionSandboxMode(agent: Pick<Agent, 'session'>): string | unde
       return typeof mode === 'string' ? mode : undefined
     }
   }
-  return undefined
+  // No override in the log: the deployment default applies.
+  return typeof service?.defaultMode === 'string' ? service.defaultMode : undefined
 }
 
 function errorCode(result: unknown): string | undefined {
@@ -210,7 +223,12 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   const config = resolveGateConfig(input)
   if (!config.planFirst.enabled && !config.runRules.enabled) return
 
-  const stateRoot = resolve(config.cwd || process.cwd(), config.stateDir)
+  const workspace = resolve(config.cwd || process.cwd())
+  const stateRoot = resolve(workspace, config.stateDir)
+  // The HMAC key and anchors live outside the workspace, so workspace writes cannot forge or truncate state.
+  const keyDir = resolve(config.keyDir || defaultKeyDir())
+  assertKeyDirOutside(keyDir, workspace)
+  const keyring: Keyring = loadKeyring(keyDir)
   const planningTools = new Set(config.planFirst.planningTools)
   const controlTools = new Set<string>()
   if (config.planFirst.enabled) controlTools.add(EXIT_PLAN_MODE)
@@ -233,6 +251,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
       ...(gate.planNotice === undefined ? {} : { planNotice: gate.planNotice }),
       ...(gate.stateNotice === undefined ? {} : { stateNotice: gate.stateNotice }),
       ...(gate.countsUntrusted === undefined ? {} : { countsUntrusted: gate.countsUntrusted }),
+      ...(gate.fold.malformed === undefined ? {} : { stateBroken: gate.fold.malformed }),
       ...(config.runRules.enabled && gate.fold.rulesInvalid !== undefined ? { rulesInvalid: gate.fold.rulesInvalid } : {}),
       updatedAt: Date.now(),
     }
@@ -279,10 +298,24 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   /** Replay durable state for one agent's own session and fail closed on any doubt. */
   function open(agent: Agent): AgentGate {
     const sessionId = String(agent.id)
-    const store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'gate', ...(hooks.pluginRecords === undefined ? {} : { pluginRecords: hooks.pluginRecords }) })
-    const snapshot = store.read()
-    let fold = foldGateRecords(snapshot.records)
-    const trust = evaluateTrust(agent.session.snapshotEvents(), snapshot, fold, limitedTools)
+    const store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'gate', keyring, ...(hooks.pluginRecords === undefined ? {} : { pluginRecords: hooks.pluginRecords }) })
+    let snapshot: ReturnType<StateStore['read']>
+    let fold: GateFold
+    let trust: ReturnType<typeof evaluateTrust>
+    try {
+      snapshot = store.read()
+      fold = foldGateRecords(snapshot.records)
+      trust = evaluateTrust(agent.session.snapshotEvents(), snapshot, fold, limitedTools)
+    } catch (error) {
+      // Unreadable state must not break session creation: deny everything with a notice.
+      const reason = `dsh-viztools gate state for this session could not be read (${error instanceof Error ? error.message : String(error)})`
+      warn(ctx, reason)
+      const broken: AgentGate = { store, sessionId, fold: { ...foldGateRecords([]), malformed: reason }, reserved: new Map(), audited: new Set(), verdicts: new Map(), pending: [] }
+      gates.set(agent, broken)
+      gatesBySession.set(sessionId, broken)
+      return broken
+    }
+    if (fold.malformed !== undefined) warn(ctx, fold.malformed)
     const gate: AgentGate = { store, sessionId, fold, reserved: new Map(), audited: new Set(), verdicts: new Map(), pending: [] }
     if (!trust.countsTrusted) gate.countsUntrusted = trust.reason ?? 'dsh-viztools gate counts cannot be trusted'
     if (trust.needsReset || trust.missing) {
@@ -325,7 +358,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
 
   function ptcPolicy(agent: Agent): { allowed: boolean; reason?: string } {
     if (!config.planFirst.allowPtcTransport) return { allowed: false, reason: 'run_code is refused before plan approval: its program can use Node APIs (fs, net, child_process), so it would bypass the gate. A deployment can opt in with planFirst.allowPtcTransport when the file policy is confined.' }
-    const mode = sessionSandboxMode(agent)
+    const mode = sessionSandboxMode(agent, ctx.get('sandboxPolicy' as never) ?? agent.ctx.get('sandboxPolicy' as never))
     if (mode === undefined || mode === 'danger-full-access') return { allowed: false, reason: `run_code is refused before plan approval because the session file policy is ${mode ?? 'unknown'}; it is allowed only under a confined (read-only or workspace-write) policy.` }
     return { allowed: true }
   }
@@ -442,6 +475,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
         ...(active?.fold.rules === undefined ? {} : { rules: active.fold.rules }),
         ...(config.runRules.enabled && active?.fold.rulesInvalid !== undefined ? { rulesInvalid: active.fold.rulesInvalid } : {}),
         ...(active?.countsUntrusted === undefined ? {} : { countsUntrusted: active.countsUntrusted }),
+        ...(active?.fold.malformed === undefined ? {} : { stateBroken: active.fold.malformed }),
         counts: active === undefined ? {} : liveCounts(active),
         tool: exec.name,
         denialMessage: config.planFirst.denialMessage,

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeysFromRecords, reportKey, type ReportChange } from './report-domain.js'
-import { openStateStore, type JsonValue, type StateStore } from './state-store.js'
+import { assertKeyDirOutside, defaultKeyDir, loadKeyring, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 import { isSafeSessionId, publishManagedState, readManagedState, REPORT_ROUTE, reportRouteUrl } from './managed-state.js'
 import { serveReport } from './report-route.js'
@@ -40,6 +40,7 @@ export interface Config {
   killGraceMs?: number
   stateDir?: string
   gateStateDir?: string
+  keyDir?: string
 }
 
 export interface ResolvedConfig {
@@ -59,6 +60,7 @@ export interface ResolvedConfig {
   killGraceMs: number
   stateDir: string
   gateStateDir: string
+  keyDir: string
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -78,6 +80,7 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   killGraceMs: z.number().min(100).default(2_000),
   stateDir: z.string().default('.dsh/viztools/state'),
   gateStateDir: z.string().default('.dsh/viztools/state'),
+  keyDir: z.string().default(''),
 })
 
 function within(root: string, candidate: string): boolean {
@@ -165,11 +168,14 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const turnScheduled = new Set<string>()
   const stateRoot = safePath(cwd, config.stateDir, 'report stateDir')
   const gateStateRoot = safePath(cwd, config.gateStateDir, 'report gateStateDir')
+  const keyDir = resolve(config.keyDir || defaultKeyDir())
+  assertKeyDirOutside(keyDir, cwd)
+  let keyring: Keyring | undefined
   const stores = new WeakMap<Agent, StateStore>()
   /** Report outcomes live on the plugin `report` channel, never as custom session-log events. */
   const storeFor = (agent: Agent): StateStore => {
     let store = stores.get(agent)
-    if (store === undefined) { store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'report' }); stores.set(agent, store) }
+    if (store === undefined) { keyring ??= loadKeyring(keyDir); store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'report', keyring }); stores.set(agent, store) }
     return store
   }
   const append = (agent: Agent, change: ReportChange): void => {
