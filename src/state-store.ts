@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import * as dshSession from '@deepseek-ai/dsh-session'
@@ -85,6 +85,8 @@ export interface PluginRecordApi {
 export interface Keyring {
   readonly dir: string
   readonly key: Buffer
+  /** Repairs made while loading (for example a tightened directory mode), for the operator. */
+  readonly notices?: readonly string[]
 }
 
 /** Default key directory: `$DSH_HOME/viztools` (DSH home defaults to `~/.dsh`). */
@@ -141,8 +143,12 @@ export function writeFileAtomicSync(path: string, contents: string | Buffer, mod
   fsyncDir(dirname(path))
 }
 
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+/** The key file exists but is still empty or short (a concurrent or interrupted writer). */
+export class KeyNotReadyError extends Error {
+  readonly code = 'KEY_NOT_READY'
+  constructor(path: string) {
+    super(`dsh-viztools key at ${path} is empty or incomplete`)
+  }
 }
 
 /** Owner-only check: no group/other permission bits, owned by this user, not a symlink. */
@@ -151,9 +157,28 @@ export function assertPrivate(path: string, kind: 'directory' | 'file'): void {
   if (info.isSymbolicLink()) throw new Error(`dsh-viztools ${kind} ${path} must not be a symbolic link`)
   if (kind === 'directory' ? !info.isDirectory() : !info.isFile()) throw new Error(`dsh-viztools ${kind} ${path} is not a ${kind}`)
   if (process.platform === 'win32') return
-  if ((info.mode & 0o077) !== 0) throw new Error(`dsh-viztools ${kind} ${path} must not be accessible to group or others (mode ${(info.mode & 0o777).toString(8)})`)
   const uid = process.getuid?.()
-  if (uid !== undefined && info.uid !== uid) throw new Error(`dsh-viztools ${kind} ${path} is owned by uid ${info.uid}, not ${uid}`)
+  if (uid !== undefined && info.uid !== uid) throw new Error(`dsh-viztools ${kind} ${path} is owned by uid ${info.uid}, not ${uid}; it must belong to the console user`)
+  if ((info.mode & 0o077) !== 0) {
+    throw new Error(kind === 'file'
+      ? `dsh-viztools key file ${path} is accessible to group or others (mode ${(info.mode & 0o777).toString(8)}), so the key may have leaked. Rotate it: stop the console, delete ${path} and ${join(dirname(path), 'anchors')}, and restart (existing gated sessions then fail closed and need re-approval)`
+      : `dsh-viztools directory ${path} must not be accessible to group or others (mode ${(info.mode & 0o777).toString(8)})`)
+  }
+}
+
+/**
+ * Tighten a key directory that we own but that is group/other-accessible (for example created
+ * by an earlier version or under a permissive umask). The key FILE was always created 0600,
+ * so a 0755 directory never exposed it; directories owned by someone else are refused.
+ */
+function tightenOwnDirectory(dir: string): string | undefined {
+  if (process.platform === 'win32') return undefined
+  const info = lstatSync(dir)
+  const uid = process.getuid?.()
+  if (!info.isDirectory() || info.isSymbolicLink() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o077) === 0) return undefined
+  const before = (info.mode & 0o777).toString(8)
+  chmodSync(dir, 0o700)
+  return `tightened dsh-viztools key directory ${dir} from mode ${before} to 700`
 }
 
 const KEY_HEX_LENGTH = 64
@@ -161,13 +186,17 @@ const KEY_HEX_LENGTH = 64
 /**
  * Load (or create once) the HMAC key in `keyDir`. Creation is race-safe: the key is written
  * and fsync'd to a unique temp file, then hard-linked into place (the link fails if another
- * process won), so the key file is never observed partially written. Readers still retry
- * briefly on an empty or short file, which older writers could leave behind. The directory
- * and the file must be owner-only.
+ * process won), so a key file created this way is never observed partially written. An empty
+ * or short file (an older or interrupted writer) throws {@link KeyNotReadyError} immediately:
+ * no blocking wait; use {@link loadKeyringAsync} to retry on timers. The directory and the file
+ * must be owner-only; an own, group-readable directory is tightened with a notice.
  */
 export function loadKeyring(keyDir: string = defaultKeyDir()): Keyring {
   const dir = realPathish(keyDir)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  const notices: string[] = []
+  const tightened = tightenOwnDirectory(dir)
+  if (tightened !== undefined) notices.push(tightened)
   assertPrivate(dir, 'directory')
   const path = join(dir, 'sidecar.key')
   if (!existsSync(path)) {
@@ -183,16 +212,24 @@ export function loadKeyring(keyDir: string = defaultKeyDir()): Keyring {
     }
     fsyncDir(dir)
   }
-  let text = ''
-  for (let attempt = 0; attempt < 50; attempt++) {
-    text = readFileSync(path, 'utf8').trim()
-    if (text.length >= KEY_HEX_LENGTH) break
-    sleepSync(20)
-  }
   assertPrivate(path, 'file')
+  const text = readFileSync(path, 'utf8').trim()
+  if (text.length < KEY_HEX_LENGTH) throw new KeyNotReadyError(path)
   const key = Buffer.from(text, 'hex')
-  if (text.length < KEY_HEX_LENGTH || key.length < 32) throw new Error(`dsh-viztools key at ${path} is empty or invalid`)
-  return { dir, key }
+  if (key.length < 32) throw new Error(`dsh-viztools key at ${path} is invalid`)
+  return { dir, key, ...(notices.length === 0 ? {} : { notices }) }
+}
+
+/** {@link loadKeyring}, retrying a not-yet-written key on timers (never blocking the event loop). */
+export async function loadKeyringAsync(keyDir: string = defaultKeyDir(), attempts = 50, delayMs = 20): Promise<Keyring> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return loadKeyring(keyDir)
+    } catch (error) {
+      if (!(error instanceof KeyNotReadyError) || attempt >= attempts) throw error
+      await new Promise((resolveLater) => setTimeout(resolveLater, delayMs))
+    }
+  }
 }
 
 /** The plugin-record API of the running DSH, when it has one (DSH ≥ 0.2.1). */
@@ -230,8 +267,18 @@ function sign(key: Buffer, channel: StoreChannel, record: Omit<StoredRecord, 'ma
   return { ...record, mac: recordMac(key, channel, record.session, record) }
 }
 
+/** One complete line of the sidecar, as seen by verification. */
+interface TailLine {
+  readonly authentic: boolean
+  readonly i?: number
+  readonly mac?: string
+  readonly accepted?: boolean
+}
+
 interface ChainResult {
   readonly records: StoredRecord[]
+  /** Every complete line in file order (for the "head is last" anchor check). */
+  readonly tail: TailLine[]
   readonly integrity: StoreIntegrity
   readonly next: { readonly i: number; readonly prev: string }
   /** Whether the next append must be a reset (corruption seen). */
@@ -264,8 +311,13 @@ export function verifyChain(lines: readonly string[], keyring: Keyring, channel:
   // are durable, so it never held anchored state; the anchor check catches real truncation.
   const complete = tornTail ? lines.slice(0, -1) : lines
   const records: StoredRecord[] = []
+  const tail: TailLine[] = []
   let expected = 0
   let prev = ''
+  // Highest index of any AUTHENTIC record seen so far, accepted or not. Indices must strictly
+  // increase across the whole file, so a replay of the session's own older records (including
+  // an old reset) is detected even though every replayed record is MAC-valid.
+  let highest = -1
   let broken: string | undefined
   let synced = true
   let resynced = false
@@ -274,31 +326,48 @@ export function verifyChain(lines: readonly string[], keyring: Keyring, channel:
     try { record = decodeRecord(JSON.parse(line)) } catch { record = undefined }
     const owner = record === undefined ? undefined : typeof expectedSession === 'string' ? expectedSession : expectedSession(record)
     const authentic = record !== undefined && owner !== undefined && record.session === owner && same(record.mac, recordMac(keyring.key, channel, owner, record))
-    if (record !== undefined && authentic && record.kind === 'reset' && record.prev === '') {
+    if (record === undefined || !authentic) {
+      tail.push({ authentic: false })
+      if (synced) { broken ??= record === undefined ? `record ${position} is unreadable` : `record ${position} fails authentication`; synced = false }
+      continue
+    }
+    if (record.i <= highest) {
+      // Replayed or reordered: never accepted, not even a reset.
+      tail.push({ authentic: true, i: record.i, mac: record.mac, accepted: false })
+      broken ??= `record ${position} (#${record.i}) repeats or reorders an earlier index`
+      synced = false
+      continue
+    }
+    if (record.kind === 'reset' && record.prev === '' && record.i === highest + 1) {
       // Our own marker that earlier damage was detected: restart the chain here and keep the
       // store flagged as damaged, so trust in pre-reset counts is never restored.
       broken ??= 'a reset record marks earlier damage'
       synced = true
       resynced = true
+      highest = record.i
       records.push(record)
+      tail.push({ authentic: true, i: record.i, mac: record.mac, accepted: true })
       expected = record.i + 1
       prev = record.mac
       continue
     }
-    if (!synced) continue
-    if (record === undefined || !authentic || record.i !== expected || record.prev !== prev) {
-      broken ??= record === undefined ? `record ${position} is unreadable` : !authentic ? `record ${position} fails authentication` : `record ${position} breaks the chain`
-      synced = false
+    highest = record.i
+    if (!synced || record.i !== expected || record.prev !== prev) {
+      tail.push({ authentic: true, i: record.i, mac: record.mac, accepted: false })
+      if (synced) { broken ??= `record ${position} breaks the chain`; synced = false }
       continue
     }
     records.push(record)
+    tail.push({ authentic: true, i: record.i, mac: record.mac, accepted: true })
     expected = record.i + 1
     prev = record.mac
   }
   return {
     records,
+    tail,
     integrity: broken === undefined ? { status: 'ok' } : { status: 'truncated', reason: broken },
-    next: { i: expected, prev },
+    // The next record (or reset) always takes an index above everything in the file.
+    next: { i: highest + 1, prev: synced ? prev : '' },
     needsReset: broken !== undefined && !(resynced && synced),
     tornTail,
     resynced,
@@ -357,20 +426,27 @@ function readSidecar(path: string): { lines: string[]; tornTail: boolean; exists
 
 /**
  * Check the verified chain against its anchor. This runs even when the chain itself is
- * damaged (after a reset): the anchored head must be present, so truncating post-reset
- * records (for example a later, narrowing rules approval) is detected. At most ONE MAC-valid
- * record may lie beyond the anchor (a crash between the record and the anchor write).
+ * damaged (after a reset). The anchored head must be an accepted record AND the last complete
+ * line of the file, or the second-to-last when exactly one accepted record at `head + 1`
+ * follows (a crash between the record and the anchor write). Anything else after the head,
+ * such as a replay of older records, garbage, or a second extra record, fails closed.
  */
 function anchored(chain: ChainResult, anchor: Anchor | 'invalid' | undefined, hasRecords: boolean): StoreIntegrity {
   if (anchor === 'invalid') return { status: 'truncated', reason: 'the out-of-workspace anchor fails authentication' }
   if (anchor === undefined) return hasRecords ? { status: 'truncated', reason: 'records exist but their out-of-workspace anchor is missing' } : { status: 'ok' }
-  const beyond = chain.records.filter((record) => record.i > anchor.last).length
-  if (beyond > 1) return { status: 'truncated', reason: `${beyond} records lie beyond the out-of-workspace anchor (at most one is possible)` }
-  if (anchor.last < 0) return { status: 'ok' }
+  const lines = chain.tail
+  const last = lines.at(-1)
+  if (anchor.last < 0) {
+    if (lines.length === 0) return { status: 'ok' }
+    return lines.length === 1 && last?.accepted === true && last.i === 0 ? { status: 'ok' } : { status: 'truncated', reason: 'records lie beyond an anchor that recorded none' }
+  }
   const head = chain.records.find((record) => record.i === anchor.last)
   if (head === undefined) return hasRecords ? { status: 'truncated', reason: `records up to #${anchor.last} were written but are missing` } : { status: 'missing', reason: 'the sidecar is missing although its anchor records written state' }
   if (!same(head.mac, anchor.head)) return { status: 'truncated', reason: `record #${anchor.last} does not match its anchor` }
-  return { status: 'ok' }
+  const isHead = (line: TailLine | undefined): boolean => line?.accepted === true && line.i === anchor.last && line.mac !== undefined && same(line.mac, anchor.head)
+  if (isHead(last)) return { status: 'ok' }
+  if (last?.accepted === true && last.i === anchor.last + 1 && isHead(lines.at(-2))) return { status: 'ok' }
+  return { status: 'truncated', reason: `the anchored head #${anchor.last} is not the last record (data follows it)` }
 }
 
 function worst(a: StoreIntegrity, b: StoreIntegrity): StoreIntegrity {
@@ -497,8 +573,10 @@ export function createPluginRecordStore(session: StoreSession, channel: StoreCha
       const owner = (record: StoredRecord): string | undefined => record.session === sessionId || record.logSeq <= cut ? record.session : undefined
       const chain = verifyChain(all, keyring, channel, owner)
       const anchor = readAnchor(keyring, sessionId, channel)
-      const own = chain.records.some((record) => record.session === sessionId)
-      const anchorIntegrity: StoreIntegrity = own || anchor !== undefined ? anchored({ ...chain, records: chain.records.filter((record) => record.session === sessionId) }, anchor, own) : { status: 'ok' }
+      // Inherited (parent) records precede this session's own; the anchor covers only its own.
+      const ownRecords = chain.records.filter((record) => record.session === sessionId)
+      const own = ownRecords.length > 0
+      const anchorIntegrity: StoreIntegrity = own || anchor !== undefined ? anchored({ ...chain, records: ownRecords, tail: chain.tail.filter((line) => line.accepted !== true || ownRecords.some((record) => record.mac === line.mac)) }, anchor, own) : { status: 'ok' }
       const integrity = worst(chain.integrity, anchorIntegrity)
       const resynced = chain.resynced && anchorIntegrity.status === 'ok'
       cursor = { i: chain.next.i, prev: chain.next.prev, needsReset: (chain.needsReset || integrity.status !== 'ok') && !resynced }

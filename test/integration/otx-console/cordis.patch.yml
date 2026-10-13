@@ -107,6 +107,10 @@
                     allowedTools: [mcp__otx__bench_status, mcp__otx__describe_profile, mcp__otx__start_run, mcp__otx__parse_snoop, mcp__otx__get_messages, mcp__otx__propose_sequence, mcp__otx__emit_otx, mcp__otx__replay_tx_only, mcp__otx__diff, mcp__otx__finalize_run, mcp__otx__abandon_run, todo_write]
                     maxLimits:
                       mcp__otx__replay_tx_only: 6
+                  # Readers are deny-by-default: the deployment vouches that the OTX bench tools
+                  # cannot read arbitrary files (in particular not $DSH_HOME/viztools).
+                  keyProtection:
+                    safeTools: [mcp__otx__*]
 - id: tool-bash
   disabled: true
 - id: tool-pwsh

@@ -44,10 +44,16 @@ Status: **automated blockers closed; internal acceptance pending** (see `SECURIT
 5. **Docs:** a751b39 sessions: delete the old sidecar and anchors, restore the original log from the backup, repair again — or start new sessions (README).
 6. **Firefox viewer:** an in-memory storage shim is the first element of the srcdoc `<head>`; the sandbox is unchanged. Tests: `test_managed_view.py` and the integration Firefox phase (two viewer reloads).
 
+## Follow-up on 804fbef (2026-10-13, PoC r1 reproduced)
+
+1. **HIGH:** a replay of the session's own old reset segment widened the rules again. Now indices strictly increase across the file, a reset is accepted only at the next index, and the anchored head must be the last record (or second-to-last in the crash window). Tests: `state-store`, `gate-runtime`.
+2. **MEDIUM:** file readers are deny-by-default (`keyProtection.safeTools`), and a probe can never clear in-process readers, `read_mcp_resource`, or MCP tools. Tests: `gate-runtime`. Migration: the OTX console lists `mcp__otx__*` as safe.
+3. **LOW:** the shim is anchored to the real `<head>` (`html.parser`); the key wait no longer blocks; an own 0755 key directory is tightened, and a leaked key file is explained. Tests: `test_managed_view.py`, `state-store`, `gate-runtime`.
+
 ## Evidence
 
 ```text
-pnpm check:            149 TypeScript tests, 33 Python tests passed
+pnpm check:            158 TypeScript tests, 34 Python tests passed
 pnpm test:integration: 53/53 checks passed (Chromium + Firefox; restart, resume, repair, live-lease refusal)
 ```
 

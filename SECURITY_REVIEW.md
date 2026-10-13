@@ -10,7 +10,7 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 
 ## Automated evidence (2026-10-13)
 
-`pnpm check`: 149 TypeScript tests and 33 Python tests pass. `pnpm test:integration` (real DSH 0.2.0-rc.2 web, OTX topology, mock LLM, late-registering MCP fixture, headless Chromium at 1910×916 and Firefox, restart + resume + repair + live-lease refusal): **53/53 checks pass**.
+`pnpm check`: 158 TypeScript tests and 34 Python tests pass. `pnpm test:integration` (real DSH 0.2.0-rc.2 web, OTX topology, mock LLM, late-registering MCP fixture, headless Chromium at 1910×916 and Firefox, restart + resume + repair + live-lease refusal): **53/53 checks pass**.
 
 ### Durable state and restart
 
@@ -20,7 +20,8 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 - [x] Integrity is keyed: an HMAC-SHA256 chain with its key outside the workspace (`$DSH_HOME/viztools/sidecar.key`, 0600; a `keyDir` inside the workspace is rejected), plus a MAC'd out-of-workspace anchor (head and lineage). PoCs fail closed: forged unkeyed approval, whole-record tail truncation, deleted sidecar, tampered or missing anchor. *(The a751b39 chain was unkeyed; corrected.)*
 - [x] Forks honour inherited approval and counts through recursive lineage (grandchildren included).
 - [x] Records are bound to their session and channel; a grafted donor record fails. The anchor head is compared on every read, including after a reset, so truncating a post-reset narrowing rule fails closed. At most one record may lie beyond the anchor. *(Gaps in e27dbcf; corrected.)*
-- [x] **Key readability:** the sidecar is tamper-evident only against agents that cannot read `$DSH_HOME`. While a file-reading tool is allowed (`run_code`, `bash`, `pwsh`, `read`, `read_image`, `grep`, `glob`, `str_replace_editor`, or `keyProtection.fileReadingTools`), every tool is refused unless a DSH-sandbox probe proves the key unreadable to tool subprocesses.
+- [x] Same-session replay is rejected: indices strictly increase across the file, resets are accepted only at the next index, and the anchored head must be the last record (or second-to-last for the one-record crash window). *(804fbef gap; corrected.)*
+- [x] **Key readability:** the sidecar is tamper-evident only against agents that cannot read `$DSH_HOME`. Readers are deny-by-default: every allowed tool not listed in `keyProtection.safeTools` (or built in: control tools and `todo_write`) is a reader, and every tool is refused while one is allowed. A DSH-sandbox probe can clear only `bash`, `pwsh`, and `run_code`; in-process readers, `read_mcp_resource`, and MCP tools are never cleared by it.
 - [x] An unusable `keyDir` (inside the workspace by realpath, not owner-only, or a creation failure) denies all tools with a notice. Key creation is race-safe.
 - [x] A malformed but authentic record, or unreadable state, denies every tool with a notice; agent creation never crashes.
 - [x] Fail closed: a missing (with gated activity in the log), truncated, or edited sidecar means no plan approval, saved rules refused until re-approved, and limited tools refused for the session. A completed limited call without a recorded decision also makes counts untrusted.
@@ -47,7 +48,7 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 - [ ] Re-run on the real OTX console (Fedora VM) with real OTX tools: restart and reopen a gated session, and confirm the report fills the sidebar.
 - [ ] Run `dsh-viztools-repair --dry-run`, then the real repair, on the existing console DSH home (stop all consoles first), and confirm the old sessions open.
 - [ ] Approve rules in the real Client UI and capture refusal/limit evidence.
-- [ ] Confirm internal `check-dsh-profile.py` enforces every item in `THREAT_MODEL.md` (including `allowPtcTransport`, `delegation.allow`, matching state directories, a `keyDir` outside the agent's writable paths, and no unconfined file-reading tools, including MCP readers listed in `keyProtection.fileReadingTools`).
+- [ ] Confirm internal `check-dsh-profile.py` enforces every item in `THREAT_MODEL.md` (including `allowPtcTransport`, `delegation.allow`, matching state directories, a `keyDir` outside the agent's writable paths, and a justified `keyProtection.safeTools` list, e.g. `mcp__otx__*` for the bench tools).
 - [ ] Review and checksum the deployment's OTX report template.
 - [ ] Validate the Phase F Podman image with networking disabled. The static export loads marimo frontend assets; confirm they render with networking off.
 - [ ] Confirm that report and sidecar file permissions and retention satisfy internal policy.

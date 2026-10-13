@@ -4,6 +4,24 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — follow-up on 804fbef (2026-10-13, PoC `r1.ts` reproduced)
+
+- **HIGH 1, same-session replay:** indices must strictly increase across the whole sidecar. A reset is accepted only at `highest index + 1`, never lower, and the next record or reset always takes an index above everything in the file. The anchored head must be the last record, or second-to-last when exactly one record at `head + 1` follows (the crash window). PoC: re-appending the session's own old reset, approval, and wider rules used to widen the rules back. It now leaves the store unsynced, the gate writes a fresh reset, approval and rules are void again, and the narrowing approval is never undone.
+- **MEDIUM 2, deny-by-default readers:**
+  - every allowed or visible tool counts as a file reader unless it is a gate control tool, `todo_write`, or listed in the new `keyProtection.safeTools` (exact name or `prefix*`). This covers `edit`, `read_mcp_resource`, and MCP tools;
+  - a subprocess probe can clear only `bash`, `pwsh`, and `run_code`. In-process readers (`read`, `read_image`, `grep`, `glob`, `edit`, `str_replace_editor`), `read_mcp_resource`, and MCP tools are never cleared by a passing probe;
+  - `keyProtection.fileReadingTools` no longer has a default list; it now only forces readers;
+  - **Migration:** list safe tools explicitly. The OTX console needs `keyProtection.safeTools: [mcp__otx__*]`.
+- **LOW 3:**
+  - the storage shim is inserted into the real `<head>`, found with `html.parser`, so a `<head>` inside a comment, a script, or text is ignored; without a head it falls back to `<html>`;
+  - the blocking key wait is gone: `loadKeyring` fails fast with `KeyNotReadyError`, and the gate, report, and repair wait on timers through `loadKeyringAsync`;
+  - on upgrade, a key directory you own at 0755 is tightened to 0700 with a notice. A key file readable by others is refused with rotation instructions.
+- **Tests:**
+  - `state-store`: replayed reset segment (gate writes a fresh reset at `i = highest + 1`), replayed lone reset, older record after the head, fail-fast and timer-based key load, 0755 upgrade, leaked-key message;
+  - `gate-runtime`: replay through the real `ToolRuntime` (narrowing not undone), `edit`/`read_mcp_resource`/MCP readers denied by default, `safeTools` with an MCP prefix, `fileReadingTools` overriding safe, in-process readers not cleared by a passing probe, non-blocking key wait at agent creation, 0755 upgrade;
+  - Python: decoy `<head>` in a comment and a script string, and the `<html>` fallback;
+  - the integration profile vouches for `mcp__otx__*`.
+
 ### Security — follow-up on e27dbcf (2026-10-13, PoCs reproduced)
 
 - **HIGH 1, records bound to session and channel:** verification recomputes each MAC with the reader's own session id and channel and rejects records claiming another session. A donor session's MAC-valid record grafted into another chain now fails, and so does a gate record replayed on the report channel. The anchor head is compared on every read, including after a reset. Truncating a later, narrowing `rules-approved` from the post-reset tail is detected and triggers another reset (approval and rules void again). The MAC input format is unchanged, so e27dbcf sidecars still verify.

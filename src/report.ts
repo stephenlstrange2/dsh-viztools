@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeysFromRecords, reportKey, type ReportChange } from './report-domain.js'
-import { assertKeyDirOutside, defaultKeyDir, loadKeyring, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
+import { assertKeyDirOutside, defaultKeyDir, loadKeyringAsync, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 import { isSafeSessionId, publishManagedState, readManagedState, REPORT_ROUTE, reportRouteUrl } from './managed-state.js'
 import { serveReport } from './report-route.js'
@@ -179,7 +179,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     let store = stores.get(agent)
     if (store === undefined) {
       if (keyFailure !== undefined) throw new Error(`dsh-viztools cannot use its key directory (${keyFailure})`)
-      keyring ??= loadKeyring(keyDir)
+      if (keyring === undefined) throw new Error('dsh-viztools report key is not loaded yet')
       store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'report', keyring })
       stores.set(agent, store)
     }
@@ -196,7 +196,20 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     else console.warn(`dsh-viztools-report: ${message}: ${detail}`)
   }
 
+  /** Load the key on timers (a concurrently created key may not be written yet); never blocks. */
+  const ensureKeyring = async (): Promise<void> => {
+    if (keyring !== undefined || keyFailure !== undefined) return
+    keyring = await loadKeyringAsync(keyDir)
+    for (const notice of keyring.notices ?? []) report('key directory', notice)
+  }
+
   const generate = (agent: Agent, triggerSeq: number, trigger: string): Promise<void> => {
+    if (keyring === undefined && keyFailure === undefined) {
+      return ensureKeyring().then(() => generate(agent, triggerSeq, trigger), (error: unknown) => {
+        keyFailure = error instanceof Error ? error.message : String(error)
+        return generate(agent, triggerSeq, trigger)
+      })
+    }
     const key = reportKey(String(agent.id), triggerSeq, config.templateVersion)
     try {
       if (completedReportKeysFromRecords(storeFor(agent).read().records, String(agent.id)).has(key)) return Promise.resolve()

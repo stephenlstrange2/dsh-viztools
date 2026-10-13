@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { decodeGateChange } from './gate-domain.js'
 import { isSafeSessionId } from './managed-state.js'
 import { decodeRunRulesChange } from './run-rules.js'
-import { createSidecarStore, loadKeyring, type JsonValue, type Keyring, type StoreChannel } from './state-store.js'
+import { createSidecarStore, loadKeyringAsync, type JsonValue, type Keyring, type StoreChannel } from './state-store.js'
 
 /**
  * Repair DSH session logs written by dsh-viztools <= ca3b3ca.
@@ -248,7 +248,7 @@ export async function repairSessions(options: RepairOptions): Promise<RepairedSe
       // event that a DSH projection reads. Moving it aside hides the session from the UI.
 
       if (skipped === undefined && (records.length > 0 || parent !== undefined)) {
-        keyring ??= loadKeyring(options.keyDir ?? join(resolve(options.dshHome), 'viztools'))
+        keyring ??= await loadKeyringAsync(options.keyDir ?? join(resolve(options.dshHome), 'viztools'))
         // Export with the original log positions and the fork lineage, keyed and anchored.
         const fake = { id: sessionId, seq: 0, header: parent === undefined ? {} : { isSeeded: true, parentSession: parent }, inheritedEventCount: cutSeq, snapshotEvents: () => [] }
         const stores = { gate: createSidecarStore(stateRoot, fake, 'gate', keyring), report: createSidecarStore(stateRoot, fake, 'report', keyring) }

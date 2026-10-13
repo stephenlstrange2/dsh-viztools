@@ -11,7 +11,7 @@ import { decideTool, DELEGATION_TOOLS, expandPatterns, RUN_CODE, type GateDenial
 import { applyGateRecord, evaluateTrust, foldGateRecords, type GateFold, type GateRecordKind } from './gate-state.js'
 import { isSafeSessionId } from './managed-state.js'
 import { deploymentFingerprint, rulesValidForDeployment, RUN_RULES_VERSION, type RunRules } from './run-rules.js'
-import { assertKeyDirOutside, defaultKeyDir, loadKeyring, openStateStore, type JsonValue, type Keyring, type PluginRecordApi, type StateStore } from './state-store.js'
+import { assertKeyDirOutside, defaultKeyDir, KeyNotReadyError, loadKeyring, loadKeyringAsync, openStateStore, type JsonValue, type Keyring, type PluginRecordApi, type StateStore } from './state-store.js'
 
 export { GATE_EVENT_TYPE, decodeGateChange, foldGate, initialGateState } from './gate-domain.js'
 export type { GateChange, GateState } from './gate-domain.js'
@@ -42,11 +42,27 @@ export interface DelegationConfig {
 
 export interface KeyProtectionConfig {
   /** Tools that can read arbitrary files (and therefore the HMAC key). */
+  /** Tools that are ALWAYS treated as file readers, even if listed in `safeTools`. */
   fileReadingTools?: string[]
+  /**
+   * Tools the deployment vouches cannot read files (exact names, or a `prefix*`). Every other
+   * allowed tool, MCP tools included, is presumed able to read the key.
+   */
+  safeTools?: string[]
 }
 
 /** DSH native tools that can read files. Deployments add MCP or custom readers. */
-export const DEFAULT_FILE_READING_TOOLS = ['run_code', 'bash', 'pwsh', 'read', 'read_image', 'grep', 'glob', 'str_replace_editor']
+/** Known file readers, kept for documentation and for `fileReadingTools` users; readers are now deny-by-default. */
+export const DEFAULT_FILE_READING_TOOLS = ['run_code', 'bash', 'pwsh', 'read', 'read_image', 'grep', 'glob', 'edit', 'write', 'str_replace_editor', 'read_mcp_resource', 'list_mcp_resources', 'list_mcp_resource_templates']
+/** Tools that never read files: the gate's own control tools and DSH's in-session todo list. */
+export const BUILTIN_SAFE_TOOLS = ['exit_plan_mode', 'propose_run_rules', 'todo_write']
+/**
+ * Readers that run as SUBPROCESSES under DSH's sandbox, so a confinement probe can vouch for
+ * them. Everything else (in-process tools such as read, read_image, grep, edit,
+ * str_replace_editor; MCP tools and read_mcp_resource, which run in MCP server processes) can
+ * never be cleared by a probe.
+ */
+export const SANDBOXED_SUBPROCESS_TOOLS = ['bash', 'pwsh', 'run_code']
 
 export interface Config {
   planFirst?: PlanFirstConfig
@@ -75,6 +91,7 @@ export interface ResolvedConfig {
   }
   keyProtection: {
     fileReadingTools: string[]
+    safeTools: string[]
   }
   cwd: string
   stateDir: string
@@ -97,7 +114,8 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     allow: z.boolean().default(false),
   }).default({}),
   keyProtection: z.object({
-    fileReadingTools: z.array(String).default(DEFAULT_FILE_READING_TOOLS),
+    fileReadingTools: z.array(String).default([]),
+    safeTools: z.array(String).default([]),
   }).default({}),
   cwd: z.string().default(''),
   stateDir: z.string().default(DEFAULT_STATE_DIR),
@@ -135,7 +153,7 @@ function partial(config: GateInput): ResolvedConfig {
     planFirst: { enabled: false, planningTools: [], denialMessage: 'Plan not approved yet.', allowPtcTransport: false, ...config.planFirst },
     runRules: { enabled: false, allowedTools: [], maxLimits: {}, ...config.runRules },
     delegation: { allow: false, ...config.delegation },
-    keyProtection: { fileReadingTools: [...DEFAULT_FILE_READING_TOOLS], ...config.keyProtection },
+    keyProtection: { fileReadingTools: [], safeTools: [], ...config.keyProtection },
     cwd: config.cwd ?? '',
     stateDir: config.stateDir ?? DEFAULT_STATE_DIR,
     keyDir: config.keyDir ?? '',
@@ -248,14 +266,26 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   // failure) must not crash the profile: every session denies all tools with a notice.
   let keyring: Keyring | undefined
   let keyFailure: string | undefined
+  /** Pending while a key that another process is still writing becomes readable (no blocking wait). */
+  let keyringReady: Promise<void> | undefined
+  const keyProblem = (error: unknown): string => `dsh-viztools cannot use its key directory (${error instanceof Error ? error.message : String(error)})`
   try {
     assertKeyDirOutside(keyDir, workspace)
     keyring = loadKeyring(keyDir)
+    for (const notice of keyring.notices ?? []) warn(ctx, notice)
   } catch (error) {
-    keyFailure = `dsh-viztools cannot use its key directory (${error instanceof Error ? error.message : String(error)})`
-    warn(ctx, keyFailure)
+    if (error instanceof KeyNotReadyError) {
+      keyringReady = loadKeyringAsync(keyDir).then((loaded) => { keyring = loaded }, (retryError: unknown) => { keyFailure = keyProblem(retryError); warn(ctx, keyFailure) })
+    } else {
+      keyFailure = keyProblem(error)
+      warn(ctx, keyFailure)
+    }
   }
-  const fileReaders = new Set(config.keyProtection.fileReadingTools)
+  const forcedReaders = new Set(config.keyProtection.fileReadingTools)
+  const safePatterns = [...BUILTIN_SAFE_TOOLS, ...config.keyProtection.safeTools]
+  /** Deny by default: a tool is a reader unless it is vouched safe (and not forced a reader). */
+  const isReader = (tool: string): boolean => forcedReaders.has(tool) || !safePatterns.some((pattern) => pattern.endsWith('*') ? tool.startsWith(pattern.slice(0, -1)) : tool === pattern)
+  const subprocessTools = new Set(SANDBOXED_SUBPROCESS_TOOLS)
   /** Probe verdicts per (mode, workspace root): whether tool subprocesses cannot read the key. */
   const probes = new Map<string, boolean | Promise<boolean>>()
   const planningTools = new Set(config.planFirst.planningTools)
@@ -319,7 +349,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
       try { for (const schema of agent.ctx.tools.schemas(agent)) candidates.add(schema.name) } catch { /* registry unavailable: planning tools only */ }
     }
     if (config.planFirst.allowPtcTransport) candidates.add(RUN_CODE)
-    const readers = [...candidates].filter((tool) => fileReaders.has(tool)).sort()
+    const readers = [...candidates].filter(isReader).sort()
     readerCache.set(agent, readers)
     return readers
   }
@@ -373,6 +403,11 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   function keyExposure(agent: Agent): string | undefined {
     const readers = exposedReaders(agent)
     if (readers.length === 0) return undefined
+    // A subprocess probe can only vouch for tools that run as sandboxed subprocesses.
+    const unconfinable = readers.filter((tool) => !subprocessTools.has(tool))
+    if (unconfinable.length > 0) {
+      return `dsh-viztools gate state is tamper-evident only against agents that cannot read ${keyring?.dir ?? 'its key directory'}, but ${unconfinable.join(', ')} may read files from inside DSH or an MCP server, where no sandbox probe can vouch for them. Remove them, or list them in keyProtection.safeTools only if they cannot read files`
+    }
     const { verdict } = probeKey(agent)
     if (verdict === true) return undefined
     return `dsh-viztools gate state is tamper-evident only against agents that cannot read ${keyring?.dir ?? 'its key directory'}, but ${readers.join(', ')} can read files and tool subprocesses can read the key (DSH's file sandbox restricts writes, not reads)${verdict === false ? '' : '; the key protection probe is still running'}. Remove those tools from this deployment or run them under a sandbox that denies reads of the key directory`
@@ -524,7 +559,9 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
     }))
   }
 
-  ctx.on('agent/created', ({ agent }) => {
+  ctx.on('agent/created', ({ agent }) => keyringReady === undefined ? onCreated(agent) : keyringReady.then(() => onCreated(agent)).then(() => undefined))
+
+  function onCreated(agent: Agent): Promise<undefined> | undefined {
     const header = agent.session.header as { parentSession?: unknown; delegationDepth?: unknown }
     const depth = typeof header.delegationDepth === 'number' ? header.delegationDepth : 0
     const isChild = depth > 0
@@ -643,7 +680,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
     })
     if (exposedReaders(agent).length > 0) return Promise.resolve(probeKey(agent).verdict).then(() => undefined)
     return undefined
-  })
+  }
 
   ctx.on('tools/result', (exec, result) => {
     const agent = exec.agent

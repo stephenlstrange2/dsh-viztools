@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Session } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
-import { assertKeyDirOutside, createSidecarStore, detectPluginRecordApi, loadKeyring, openStateStore, readAnchor, verifyChain, writeAnchor } from '../src/state-store.js'
+import { assertKeyDirOutside, createSidecarStore, detectPluginRecordApi, KeyNotReadyError, loadKeyring, loadKeyringAsync, openStateStore, readAnchor, verifyChain, writeAnchor } from '../src/state-store.js'
 
 const session = (id: string, header: Record<string, unknown> = {}, inherited = 0) => ({ id, seq: 0, header, inheritedEventCount: inherited, snapshotEvents: () => [] })
 
@@ -179,37 +179,48 @@ describe('follow-up hardening (e27dbcf PoCs)', () => {
     store.append('c', {})
     // Roll the anchor back two records (e.g. an anchor restored from an older backup).
     writeAnchor(keyring, { session: 'b1', channel: 'gate', last: first.i, head: first.mac })
-    expect(createSidecarStore(root, session('b1'), 'gate', keyring).read().integrity).toMatchObject({ status: 'truncated', reason: expect.stringMatching(/beyond the out-of-workspace anchor/) })
+    expect(createSidecarStore(root, session('b1'), 'gate', keyring).read().integrity).toMatchObject({ status: 'truncated', reason: expect.stringMatching(/not the last record/) })
   })
 
-  it('creates the key race-safely (temp + link) and retries on an empty key file', async () => {
+  it('creates the key race-safely (temp + link)', async () => {
     const { base } = await fixture()
     const dir = join(base, 'race', 'viztools')
     const created = loadKeyring(dir)
     expect(loadKeyring(dir).key.equals(created.key)).toBe(true)
     const { readdir: list } = await import('node:fs/promises')
     expect((await list(dir)).filter((name) => name.startsWith('.sidecar.key.'))).toEqual([])
-    // An older writer left an empty key file that another process fills in shortly.
+  })
+
+  it('never blocks on an empty key file: sync load fails fast, async load retries on timers', async () => {
+    const { base } = await fixture()
     const slow = join(base, 'slow', 'viztools')
     const { mkdirSync, writeFileSync } = await import('node:fs')
     mkdirSync(slow, { recursive: true, mode: 0o700 })
     writeFileSync(join(slow, 'sidecar.key'), '', { mode: 0o600 })
-    const { Worker } = await import('node:worker_threads')
-    const worker = new Worker(`setTimeout(() => { require('node:fs').writeFileSync(${JSON.stringify(join(slow, 'sidecar.key'))}, 'b'.repeat(64)) }, 100)`, { eval: true })
-    expect(loadKeyring(slow).key.toString('hex')).toBe('b'.repeat(64))
-    await worker.terminate()
+    const started = Date.now()
+    expect(() => loadKeyring(slow)).toThrow(KeyNotReadyError)
+    expect(Date.now() - started).toBeLessThan(50)
+    // The event loop stays free while the async loader waits: a timer fills the key in.
+    setTimeout(() => writeFileSync(join(slow, 'sidecar.key'), 'b'.repeat(64)), 60)
+    const ticks: number[] = []
+    const ticker = setInterval(() => ticks.push(Date.now()), 10)
+    const loaded = await loadKeyringAsync(slow)
+    clearInterval(ticker)
+    expect(loaded.key.toString('hex')).toBe('b'.repeat(64))
+    expect(ticks.length).toBeGreaterThan(2)
   })
 
-  it('checks key directory and key file permissions and ownership on load', async () => {
+  it('upgrades an own 0755 key directory to 0700 with a notice, and explains a leaked key file', async () => {
     const { base } = await fixture()
-    const { chmod } = await import('node:fs/promises')
+    const { chmod, stat: statFile } = await import('node:fs/promises')
     const dir = join(base, 'perm', 'viztools')
     loadKeyring(dir)
-    await chmod(dir, 0o750)
-    expect(() => loadKeyring(dir)).toThrow(/must not be accessible to group or others/)
-    await chmod(dir, 0o700)
-    await chmod(join(dir, 'sidecar.key'), 0o640)
-    expect(() => loadKeyring(dir)).toThrow(/must not be accessible to group or others/)
+    await chmod(dir, 0o755)
+    const upgraded = loadKeyring(dir)
+    expect(upgraded.notices?.[0]).toMatch(/tightened .* from mode 755 to 700/)
+    expect((await statFile(dir)).mode & 0o777).toBe(0o700)
+    await chmod(join(dir, 'sidecar.key'), 0o644)
+    expect(() => loadKeyring(dir)).toThrow(/key may have leaked\. Rotate it: stop the console, delete .*sidecar\.key and .*anchors/)
   })
 
   it('compares the key directory with the workspace by realpath', async () => {
@@ -218,6 +229,66 @@ describe('follow-up hardening (e27dbcf PoCs)', () => {
     await mkdir(join(base, 'workspace'), { recursive: true })
     await symlink(join(base, 'workspace'), join(base, 'alias'))
     expect(() => assertKeyDirOutside(join(base, 'alias', 'keys'), join(base, 'workspace'))).toThrow(/outside the workspace/)
+  })
+})
+
+describe('same-session replay (804fbef PoC r1)', () => {
+  const rules = (allow: string[]) => ({ version: 3, allow, deny: [], limits: {}, notes: [], deploymentFingerprint: 'x' })
+
+  async function damagedThenNarrowed() {
+    const { root, keyring } = await fixture()
+    const store = createSidecarStore(root, session('c'), 'gate', keyring)
+    store.append('refused', { callId: 'c', tool: 't', code: 'X', reason: 'r' })
+    await appendFile(store.location, 'garbage\n')
+    const writer = createSidecarStore(root, session('c'), 'gate', keyring)
+    writer.read()
+    writer.append('plan-approved', { planCallId: 'p' }) // writes reset + approval
+    writer.append('rules-approved', { callId: 'r1', rules: rules(['x', 'y']) as never })
+    writer.append('rules-approved', { callId: 'r2', rules: rules(['x']) as never }) // narrowing
+    return { root, keyring, location: store.location }
+  }
+
+  it('re-appending the session\'s own old reset + approval + wider rules fails closed', async () => {
+    const { root, keyring, location } = await damagedThenNarrowed()
+    const lines = (await readFile(location, 'utf8')).trim().split('\n')
+    const reset = lines.findIndex((line) => line.includes('"kind":"reset"'))
+    await appendFile(location, `${lines.slice(reset, reset + 3).join('\n')}\n`)
+    const snapshot = createSidecarStore(root, session('c'), 'gate', keyring).read()
+    // Not resynced: the gate must write a fresh reset (approval and rules void again).
+    expect(snapshot.resynced).toBe(false)
+    const { foldGateRecords } = await import('../src/gate-state.js')
+    expect(foldGateRecords(snapshot.records).rules?.allow).toEqual(['x'])
+    // The next append is a reset with an index above everything in the file.
+    const writer = createSidecarStore(root, session('c'), 'gate', keyring)
+    writer.read()
+    writer.append('refused', { callId: 'after', tool: 't', code: 'X', reason: 'r' })
+    const indices = (await readFile(location, 'utf8')).trim().split('\n').flatMap((line) => { try { return [JSON.parse(line)] } catch { return [] } })
+    // File so far: #0, garbage, reset #1, #2, #3, #4, replayed #1-#3 → the fresh reset must be #5.
+    const fresh = (indices as { kind: string; i: number }[]).filter((record) => record.kind === 'reset').at(-1)
+    expect(fresh?.i).toBe(5)
+    expect((indices as { i: number }[]).at(-1)?.i).toBe(6)
+    const after = createSidecarStore(root, session('c'), 'gate', keyring).read()
+    expect(after.resynced).toBe(true)
+    const fold = foldGateRecords(after.records)
+    expect(fold.approved).toBe(false)
+    expect(fold.rulesInvalid).toBeDefined()
+  })
+
+  it('rejects a replayed old reset even when it is the only thing appended', async () => {
+    const { root, keyring, location } = await damagedThenNarrowed()
+    const lines = (await readFile(location, 'utf8')).trim().split('\n')
+    await appendFile(location, `${lines.find((line) => line.includes('"kind":"reset"'))}\n`)
+    expect(createSidecarStore(root, session('c'), 'gate', keyring).read()).toMatchObject({ resynced: false, integrity: { status: 'truncated' } })
+  })
+
+  it('requires the anchored head to be the last record: one MAC-valid older record after it fails', async () => {
+    const { root, keyring } = await fixture()
+    const store = createSidecarStore(root, session('h'), 'gate', keyring)
+    store.append('a', {})
+    store.append('b', {})
+    const lines = (await readFile(store.location, 'utf8')).trim().split('\n')
+    await appendFile(store.location, `${lines[0]}\n`)
+    expect(createSidecarStore(root, session('h'), 'gate', keyring).read().integrity).toMatchObject({ status: 'truncated', reason: expect.stringMatching(/repeats or reorders|not the last record/) })
   })
 })
 

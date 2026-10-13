@@ -109,6 +109,20 @@ class ManagedViewTest(unittest.TestCase):
         self.assertLess(srcdoc.index("data-viztools-storage-shim"), srcdoc.index("<meta"))
         self.assertIn("<head>" + STORAGE_SHIM, with_storage_shim("<html><body>x</body></html>"))
 
+    def test_storage_shim_targets_the_real_head_not_decoys_in_comments_or_scripts(self) -> None:
+        document = (
+            "<!DOCTYPE html>\r\n<!-- an old <head> in a comment -->"
+            "<html><script>var markup = \"<head data-decoy=1>\";</script>\n"
+            "<head data-real=\"1\"><meta charset=\"utf-8\"></head><body><p>&lt;head&gt;</p></body></html>"
+        )
+        shimmed = with_storage_shim(document)
+        self.assertEqual(shimmed.count("data-viztools-storage-shim"), 1)
+        self.assertTrue(shimmed.split('<head data-real="1">', 1)[1].startswith(STORAGE_SHIM))
+        self.assertIn('var markup = "<head data-decoy=1>";', shimmed)
+        self.assertIn("<!-- an old <head> in a comment -->", shimmed)
+        no_head = with_storage_shim("<!-- <head> --><html lang=\"en\"><body>x</body></html>")
+        self.assertIn('<html lang="en"><head>' + STORAGE_SHIM + "</head>", no_head)
+
     @unittest.skipIf(shutil.which("node") is None, "node is required to execute the shim")
     def test_storage_shim_replaces_throwing_storage_with_memory_storage(self) -> None:
         script = STORAGE_SHIM.split(">", 1)[1].rsplit("</script>", 1)[0]

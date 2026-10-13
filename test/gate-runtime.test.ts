@@ -41,7 +41,11 @@ async function harness(config: GateInput, options: { planMode?: boolean; tools?:
   const ran: string[] = []
   for (const name of options.tools ?? ['bench_status', 'replay', 'diff', 'subagent']) ctx.tools.register(ok(name, () => { ran.push(name); return { ok: true } }))
   ctx.tools.register(ok('exit_plan_mode', () => ({ approved: true })))
-  await ctx.plugin({ name: 'gate', inject: gate.inject, apply: (inner: Context, cfg: GateInput) => gate.apply(inner, cfg, { pluginRecords: options.pluginRecords ?? null }) } as never, { cwd: root, ...config } as never).await()
+  // Readers are deny-by-default; the fixture's own tools (not subprocess tools) are vouched safe
+  // unless a test configures keyProtection itself.
+  const fixtureSafe = [...(options.tools ?? ['bench_status', 'replay', 'diff', 'subagent'])].filter((tool) => !['bash', 'pwsh', 'run_code'].includes(tool))
+  const effective = { keyProtection: { safeTools: [...fixtureSafe, 'subagent', 'replay', 'diff', 'bench_status'] }, ...config }
+  await ctx.plugin({ name: 'gate', inject: gate.inject, apply: (inner: Context, cfg: GateInput) => gate.apply(inner, cfg, { pluginRecords: options.pluginRecords ?? null }) } as never, { cwd: root, ...effective } as never).await()
   return {
     ctx, root, ran,
     async agent(id, session = Session.create(id as never)) {
@@ -204,17 +208,29 @@ describe('keyed chain and out-of-workspace anchor (item 1, PoCs)', () => {
     expect((await linked.call(await linked.agent('kd2'), 'bench_status', 'b')).text).toMatch(/outside the workspace/)
   })
 
-  it('a key directory or key file with group/other access denies all with a notice', async () => {
+  it('waits for a key that is still being written without blocking, then works', async () => {
+    const { mkdir } = await import('node:fs/promises')
+    const keyDir = join(await mkdtemp(join(tmpdir(), 'viztools-keys-')), 'k')
+    await mkdir(keyDir, { mode: 0o700 })
+    await writeFile(join(keyDir, 'sidecar.key'), '', { mode: 0o600 })
+    const h = await harness({ ...otx(), keyDir })
+    setTimeout(() => { void writeFile(join(keyDir, 'sidecar.key'), 'c'.repeat(64)) }, 60)
+    const agent = await h.agent('kw1')
+    expect((await h.call(agent, 'bench_status', 'b')).isError).toBe(false)
+  })
+
+  it('an own 0755 key directory is tightened; a group/other-readable key file denies all and explains rotation', async () => {
     const { chmod, mkdir } = await import('node:fs/promises')
     const keyDir = await mkdtemp(join(tmpdir(), 'viztools-keys-'))
     await chmod(keyDir, 0o755)
+    // Upgrade path: an own 0755 directory is tightened (the key file was always 0600) and works.
     const h = await harness({ ...otx(), keyDir })
-    expect((await h.call(await h.agent('kp1'), 'bench_status', 'b')).text).toMatch(/must not be accessible to group or others/)
+    expect((await h.call(await h.agent('kp1'), 'bench_status', 'b')).isError).toBe(false)
     const keyDir2 = join(await mkdtemp(join(tmpdir(), 'viztools-keys-')), 'k')
     await mkdir(keyDir2, { mode: 0o700 })
     await writeFile(join(keyDir2, 'sidecar.key'), 'a'.repeat(64), { mode: 0o644 })
     const h2 = await harness({ ...otx(), keyDir: keyDir2 })
-    expect((await h2.call(await h2.agent('kp2'), 'bench_status', 'b')).text).toMatch(/must not be accessible to group or others/)
+    expect((await h2.call(await h2.agent('kp2'), 'bench_status', 'b')).text).toMatch(/key may have leaked\. Rotate it/)
   })
 })
 
@@ -241,15 +257,59 @@ describe('key readable by tool subprocesses (item 2)', () => {
     expect((await h.call(agent, 'replay', 'c')).text).toMatch(/tamper-evident only/)
   })
 
-  it('treats the deployment\'s own reader list as authoritative (MCP readers)', async () => {
-    const h = await harness({ ...readers(), runRules: { enabled: true, allowedTools: ['replay', 'diff'], maxLimits: { replay: 2 } }, keyProtection: { fileReadingTools: ['diff'] } })
-    expect((await h.call(await h.agent('r4'), 'replay', 'c')).text).toMatch(/diff can read files/)
+  it('fileReadingTools forces a tool to be a reader even when it is listed safe', async () => {
+    const h = await harness({ ...readers(), runRules: { enabled: true, allowedTools: ['replay', 'diff'], maxLimits: { replay: 2 } }, keyProtection: { safeTools: ['replay', 'diff'], fileReadingTools: ['diff'] } })
+    expect((await h.call(await h.agent('r4'), 'replay', 'c')).text).toMatch(/but diff may read files/)
+  })
+
+  it('treats edit, read_mcp_resource, and MCP tools as readers by default (deny by default)', async () => {
+    for (const tool of ['edit', 'read_mcp_resource', 'mcp__files__read_text']) {
+      const h = await harness({ planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['replay', tool], maxLimits: { replay: 2 } }, keyProtection: { safeTools: ['replay'] } }, { tools: ['replay', tool], confinedReads: true, sandboxPolicy: { defaultMode: 'workspace-write' } })
+      expect((await h.call(await h.agent(`dd-${tool.replace(/_/g, '-')}`), 'replay', 'c')).text).toMatch(new RegExp(`but ${tool} may read files`))
+    }
+  })
+
+  it('a deployment can vouch for tools as safe, including an MCP prefix', async () => {
+    const h = await harness({ planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['replay', 'mcp__otx__bench_status', 'mcp__otx__diff'], maxLimits: { replay: 2 } }, keyProtection: { safeTools: ['replay', 'mcp__otx__*'] } }, { tools: ['replay', 'mcp__otx__bench_status', 'mcp__otx__diff'] })
+    expect((await h.call(await h.agent('safe1'), 'mcp__otx__diff', 'c')).isError).toBe(false)
+  })
+
+  it('a passing subprocess probe never clears in-process readers', async () => {
+    for (const tool of ['read', 'read_image', 'grep', 'str_replace_editor']) {
+      const h = await harness({ planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['bash', tool], maxLimits: {} }, keyProtection: { safeTools: [] } }, { tools: ['bash', tool], confinedReads: true, sandboxPolicy: { defaultMode: 'workspace-write' } })
+      expect((await h.call(await h.agent(`ip-${tool.replace(/_/g, '-')}`), 'bash', 'c')).text).toMatch(new RegExp(`but ${tool} may read files from inside DSH`))
+    }
   })
 
   it('does not interfere when no file-reading tool is allowed (the OTX console)', async () => {
     const h = await harness(otx())
     const agent = await h.agent('r5')
     expect((await h.call(agent, 'bench_status', 'b')).isError).toBe(false)
+  })
+})
+
+describe('same-session replay through the gate (804fbef PoC r1)', () => {
+  it('replaying an old reset + approval + wider rules after a narrowing approval does not widen access', async () => {
+    const config: GateInput = { planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['replay', 'diff'], maxLimits: { replay: 2 } } }
+    const h = await harness(config)
+    const agent = await h.agent('sr1')
+    await h.call(agent, 'replay', 'r0')
+    const path = join(h.root, '.dsh/viztools/state', 'sr1.gate.jsonl')
+    await writeFile(path, `${await readFile(path, 'utf8')}garbage\n`)
+    const second = await harness(config, { root: h.root })
+    const resumed = await second.agent('sr1', Session.create('sr1' as never, agent.session.snapshotEvents()))
+    const propose = (callId: string, deny: string[]) => second.ctx.tools.execute({ callId: callId as never, name: 'propose_run_rules', arguments: { deny, limits: {}, notes: [] }, agent: resumed as never, signal: new AbortController().signal })
+    expect((await propose('wide', [])).isError).toBe(false)
+    expect((await propose('narrow', ['diff'])).isError).toBe(false)
+    // PoC: append the session's own reset and the wide approval again.
+    const lines = (await readFile(path, 'utf8')).trim().split('\n')
+    const reset = lines.findIndex((line) => line.includes('"kind":"reset"'))
+    const wide = lines.findIndex((line, index) => index > reset && line.includes('"kind":"rules-approved"'))
+    await writeFile(path, `${[...lines, lines[reset], lines[wide]].join('\n')}\n`)
+    const third = await harness(config, { root: h.root })
+    const again = await third.agent('sr1', Session.create('sr1' as never, agent.session.snapshotEvents()))
+    expect((await third.call(again, 'diff', 'd')).text).toMatch(/every governed tool is refused|Approved run rules deny tool diff/)
+    expect(third.ran).toEqual([])
   })
 })
 

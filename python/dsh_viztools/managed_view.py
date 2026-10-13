@@ -6,6 +6,7 @@ import html as _html
 import json
 import os
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -62,17 +63,54 @@ STORAGE_SHIM = """<script data-viztools-storage-shim="1">(function () {
   }
 })();</script>"""
 
-_HEAD = re.compile(r"<head(\s[^>]*)?>", re.IGNORECASE)
+class _HeadLocator(HTMLParser):
+    """Find the REAL <head>/<html> start tags. html.parser already treats comments, the
+    contents of <script>/<style>, and attribute values as non-markup, so a "<head>" that
+    appears inside them is never matched."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.head: tuple[int, int, int] | None = None
+        self.html: tuple[int, int, int] | None = None
+        self.body_started = False
+
+    def _mark(self) -> tuple[int, int, int]:
+        line, column = self.getpos()
+        return line, column, len(self.get_starttag_text() or "")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag == "html" and self.html is None:
+            self.html = self._mark()
+        elif tag == "head" and self.head is None and not self.body_started:
+            self.head = self._mark()
+        elif tag == "body":
+            self.body_started = True
+
+
+def _offset(document: str, line: int, column: int) -> int:
+    # html.parser counts lines by "\n" only (unlike str.splitlines), so do the same.
+    at = 0
+    for _ in range(line - 1):
+        at = document.index("\n", at) + 1
+    return at + column
 
 
 def with_storage_shim(document: str) -> str:
-    """Insert the storage shim as the first element of the document's <head>."""
-    match = _HEAD.search(document)
-    if match is not None:
-        return document[: match.end()] + STORAGE_SHIM + document[match.end():]
-    html_tag = re.search(r"<html(\s[^>]*)?>", document, re.IGNORECASE)
-    if html_tag is not None:
-        return document[: html_tag.end()] + "<head>" + STORAGE_SHIM + "</head>" + document[html_tag.end():]
+    """Insert the storage shim as the first element of the document's real <head>."""
+    locator = _HeadLocator()
+    try:
+        locator.feed(document)
+        locator.close()
+    except Exception:  # noqa: BLE001 - malformed markup: fall back to a fresh head below
+        locator.head = None
+    if locator.head is not None:
+        line, column, length = locator.head
+        at = _offset(document, line, column) + length
+        return document[:at] + STORAGE_SHIM + document[at:]
+    if locator.html is not None:
+        line, column, length = locator.html
+        at = _offset(document, line, column) + length
+        return document[:at] + "<head>" + STORAGE_SHIM + "</head>" + document[at:]
     return "<head>" + STORAGE_SHIM + "</head>" + document
 
 
