@@ -35,12 +35,53 @@ REPORT_FRAME_SANDBOX = "allow-scripts allow-popups allow-downloads"
 REPORT_FRAME_HEIGHT = "80vh"
 
 
+# The export is a marimo app. In the sandboxed (opaque-origin) frame, touching
+# localStorage / sessionStorage / indexedDB throws SecurityError. Chromium tolerates it;
+# Firefox lands in marimo's error boundary ("Something went wrong — The operation is
+# insecure"), notably after the sidebar tab reloads. This shim runs first in <head> and gives
+# the page in-memory Storage objects (and no indexedDB when it throws) WITHOUT weakening the
+# sandbox: no allow-same-origin, nothing persists, nothing reaches the DSH or marimo origins.
+STORAGE_SHIM = """<script data-viztools-storage-shim="1">(function () {
+  function MemoryStorage() { this._d = Object.create(null); }
+  MemoryStorage.prototype = {
+    get length() { return Object.keys(this._d).length; },
+    key: function (i) { var k = Object.keys(this._d); return i >= 0 && i < k.length ? k[i] : null; },
+    getItem: function (k) { k = String(k); return Object.prototype.hasOwnProperty.call(this._d, k) ? this._d[k] : null; },
+    setItem: function (k, v) { this._d[String(k)] = String(v); },
+    removeItem: function (k) { delete this._d[String(k)]; },
+    clear: function () { this._d = Object.create(null); }
+  };
+  ["localStorage", "sessionStorage"].forEach(function (name) {
+    try { Object.defineProperty(window, name, { value: new MemoryStorage(), configurable: true, enumerable: true, writable: false }); } catch (e) {}
+  });
+  try {
+    var probe = window.indexedDB && window.indexedDB.open("__viztools_probe__");
+    if (probe) { probe.onerror = function (event) { if (event && event.preventDefault) event.preventDefault(); }; }
+  } catch (e) {
+    try { Object.defineProperty(window, "indexedDB", { value: undefined, configurable: true, enumerable: true }); } catch (e2) {}
+  }
+})();</script>"""
+
+_HEAD = re.compile(r"<head(\s[^>]*)?>", re.IGNORECASE)
+
+
+def with_storage_shim(document: str) -> str:
+    """Insert the storage shim as the first element of the document's <head>."""
+    match = _HEAD.search(document)
+    if match is not None:
+        return document[: match.end()] + STORAGE_SHIM + document[match.end():]
+    html_tag = re.search(r"<html(\s[^>]*)?>", document, re.IGNORECASE)
+    if html_tag is not None:
+        return document[: html_tag.end()] + "<head>" + STORAGE_SHIM + "</head>" + document[html_tag.end():]
+    return "<head>" + STORAGE_SHIM + "</head>" + document
+
+
 def report_frame(document: str) -> str:
     """HTML for an iframe that embeds the export at a fixed viewport-relative height."""
     return (
         f'<iframe data-viztools-report="1" title="Run report" sandbox="{REPORT_FRAME_SANDBOX}" '
         f'referrerpolicy="no-referrer" style="width:100%;height:{REPORT_FRAME_HEIGHT};min-height:480px;border:0;display:block" '
-        f'srcdoc="{_html.escape(document, quote=True)}"></iframe>'
+        f'srcdoc="{_html.escape(with_storage_shim(document), quote=True)}"></iframe>'
     )
 
 

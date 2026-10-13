@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process'
 import { renameSync, writeFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -39,10 +40,19 @@ export interface DelegationConfig {
   allow?: boolean
 }
 
+export interface KeyProtectionConfig {
+  /** Tools that can read arbitrary files (and therefore the HMAC key). */
+  fileReadingTools?: string[]
+}
+
+/** DSH native tools that can read files. Deployments add MCP or custom readers. */
+export const DEFAULT_FILE_READING_TOOLS = ['run_code', 'bash', 'pwsh', 'read', 'read_image', 'grep', 'glob', 'str_replace_editor']
+
 export interface Config {
   planFirst?: PlanFirstConfig
   runRules?: RunRulesConfig
   delegation?: DelegationConfig
+  keyProtection?: KeyProtectionConfig
   cwd?: string
   stateDir?: string
   keyDir?: string
@@ -63,6 +73,9 @@ export interface ResolvedConfig {
   delegation: {
     allow: boolean
   }
+  keyProtection: {
+    fileReadingTools: string[]
+  }
   cwd: string
   stateDir: string
   keyDir: string
@@ -82,6 +95,9 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   }).default({}),
   delegation: z.object({
     allow: z.boolean().default(false),
+  }).default({}),
+  keyProtection: z.object({
+    fileReadingTools: z.array(String).default(DEFAULT_FILE_READING_TOOLS),
   }).default({}),
   cwd: z.string().default(''),
   stateDir: z.string().default(DEFAULT_STATE_DIR),
@@ -119,6 +135,7 @@ function partial(config: GateInput): ResolvedConfig {
     planFirst: { enabled: false, planningTools: [], denialMessage: 'Plan not approved yet.', allowPtcTransport: false, ...config.planFirst },
     runRules: { enabled: false, allowedTools: [], maxLimits: {}, ...config.runRules },
     delegation: { allow: false, ...config.delegation },
+    keyProtection: { fileReadingTools: [...DEFAULT_FILE_READING_TOOLS], ...config.keyProtection },
     cwd: config.cwd ?? '',
     stateDir: config.stateDir ?? DEFAULT_STATE_DIR,
     keyDir: config.keyDir ?? '',
@@ -227,8 +244,20 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   const stateRoot = resolve(workspace, config.stateDir)
   // The HMAC key and anchors live outside the workspace, so workspace writes cannot forge or truncate state.
   const keyDir = resolve(config.keyDir || defaultKeyDir())
-  assertKeyDirOutside(keyDir, workspace)
-  const keyring: Keyring = loadKeyring(keyDir)
+  // An unusable key directory (inside the workspace, wrong owner/permissions, creation
+  // failure) must not crash the profile: every session denies all tools with a notice.
+  let keyring: Keyring | undefined
+  let keyFailure: string | undefined
+  try {
+    assertKeyDirOutside(keyDir, workspace)
+    keyring = loadKeyring(keyDir)
+  } catch (error) {
+    keyFailure = `dsh-viztools cannot use its key directory (${error instanceof Error ? error.message : String(error)})`
+    warn(ctx, keyFailure)
+  }
+  const fileReaders = new Set(config.keyProtection.fileReadingTools)
+  /** Probe verdicts per (mode, workspace root): whether tool subprocesses cannot read the key. */
+  const probes = new Map<string, boolean | Promise<boolean>>()
   const planningTools = new Set(config.planFirst.planningTools)
   const controlTools = new Set<string>()
   if (config.planFirst.enabled) controlTools.add(EXIT_PLAN_MODE)
@@ -265,6 +294,90 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
     }
   }
 
+  interface SandboxLike { confine(argv: readonly string[], policy: unknown): Promise<{ argv: string[] }> }
+  interface PolicyLike { resolve?(request: { session: unknown }): { mode?: string; workspaceRoot?: string }; defaultMode?: string }
+  const service = <T>(agent: Agent, name: string, check: (value: unknown) => boolean): T | undefined => {
+    for (const scope of [ctx, agent.ctx]) {
+      try {
+        const value = (scope as unknown as { get(name: string): unknown }).get(name)
+        if (value !== undefined && value !== null && check(value)) return value as T
+      } catch { /* not visible from this scope */ }
+    }
+    return undefined
+  }
+
+  /** File-reading tools this deployment lets the agent use (now or after approval). */
+  let readerCache = new WeakMap<Agent, string[]>()
+  ctx.on('tools/change', () => { readerCache = new WeakMap() })
+  function exposedReaders(agent: Agent): string[] {
+    const cached = readerCache.get(agent)
+    if (cached !== undefined) return cached
+    const candidates = new Set<string>()
+    if (config.runRules.enabled) for (const tool of config.runRules.allowedTools) candidates.add(tool)
+    else {
+      for (const tool of planningTools) candidates.add(tool)
+      try { for (const schema of agent.ctx.tools.schemas(agent)) candidates.add(schema.name) } catch { /* registry unavailable: planning tools only */ }
+    }
+    if (config.planFirst.allowPtcTransport) candidates.add(RUN_CODE)
+    const readers = [...candidates].filter((tool) => fileReaders.has(tool)).sort()
+    readerCache.set(agent, readers)
+    return readers
+  }
+
+  function runConfined(sandbox: SandboxLike, policy: unknown, path: string): Promise<boolean> {
+    return sandbox.confine(['cat', '--', path], policy).then((confined) => new Promise<boolean>((resolveRead) => {
+      const [command, ...args] = confined.argv
+      if (command === undefined) { resolveRead(false); return }
+      const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'ignore'] })
+      const timer = setTimeout(() => { child.kill('SIGKILL'); resolveRead(false) }, 10_000)
+      timer.unref()
+      child.once('error', () => { clearTimeout(timer); resolveRead(false) })
+      child.once('close', (code) => { clearTimeout(timer); resolveRead(code === 0) })
+    }), () => false)
+  }
+
+  /**
+   * Whether tool subprocesses CANNOT read the key under this session's policy. DSH's file
+   * sandbox restricts writes only, so by default they can. The verdict is positive only when
+   * a confined `cat` reads a control file in the workspace but fails on the key file.
+   */
+  function probeKey(agent: Agent): { key: string; verdict: boolean | Promise<boolean> } {
+    const sandbox = service<SandboxLike>(agent, 'sandbox', (value) => typeof (value as SandboxLike).confine === 'function')
+    const policyService = service<PolicyLike>(agent, 'sandboxPolicy', (value) => typeof value === 'object')
+    if (keyring === undefined || sandbox === undefined) return { key: 'none', verdict: false }
+    // Same resolution as run_code's policy check: DSH's resolve(), else the log override, else the default.
+    const mode = sessionSandboxMode(agent, policyService)
+    if (mode === undefined || mode === 'danger-full-access') return { key: mode ?? 'unknown', verdict: false }
+    let workspaceRoot = workspace
+    try { workspaceRoot = policyService?.resolve?.({ session: agent.session }).workspaceRoot ?? workspace } catch { /* fall back to the gate workspace */ }
+    const policy = { mode, workspaceRoot, sessionId: String(agent.id) }
+    const key = `${policy.mode}\u0000${policy.workspaceRoot}`
+    const known = probes.get(key)
+    if (known !== undefined) return { key, verdict: known }
+    const control = join(stateRoot, '.key-probe-control')
+    const pending = (async () => {
+      try {
+        mkdirSync(stateRoot, { recursive: true, mode: 0o700 })
+        writeFileSync(control, 'control\n', { mode: 0o600 })
+      } catch { return false }
+      const controlReadable = await runConfined(sandbox, policy, control)
+      const keyReadable = await runConfined(sandbox, policy, join(keyring.dir, 'sidecar.key'))
+      return controlReadable && !keyReadable
+    })()
+    probes.set(key, pending)
+    void pending.then((verdict) => probes.set(key, verdict))
+    return { key, verdict: pending }
+  }
+
+  /** Deny-all reason when a file-reading tool is allowed and the key is not proven unreadable. */
+  function keyExposure(agent: Agent): string | undefined {
+    const readers = exposedReaders(agent)
+    if (readers.length === 0) return undefined
+    const { verdict } = probeKey(agent)
+    if (verdict === true) return undefined
+    return `dsh-viztools gate state is tamper-evident only against agents that cannot read ${keyring?.dir ?? 'its key directory'}, but ${readers.join(', ')} can read files and tool subprocesses can read the key (DSH's file sandbox restricts writes, not reads)${verdict === false ? '' : '; the key protection probe is still running'}. Remove those tools from this deployment or run them under a sandbox that denies reads of the key directory`
+  }
+
   /** Durably record and apply one change; on failure retry once, then queue it. */
   function record(gate: AgentGate, kind: GateRecordKind, data: { [key: string]: JsonValue }): boolean {
     flushPending(gate)
@@ -298,7 +411,9 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   /** Replay durable state for one agent's own session and fail closed on any doubt. */
   function open(agent: Agent): AgentGate {
     const sessionId = String(agent.id)
-    const store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'gate', keyring, ...(hooks.pluginRecords === undefined ? {} : { pluginRecords: hooks.pluginRecords }) })
+    const store: StateStore = keyring === undefined
+      ? { backend: 'sidecar', location: stateRoot, read: () => { throw new Error(keyFailure) }, append: () => { throw new Error(keyFailure) } }
+      : openStateStore({ root: stateRoot, session: agent.session as never, channel: 'gate', keyring, ...(hooks.pluginRecords === undefined ? {} : { pluginRecords: hooks.pluginRecords }) })
     let snapshot: ReturnType<StateStore['read']>
     let fold: GateFold
     let trust: ReturnType<typeof evaluateTrust>
@@ -308,7 +423,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
       trust = evaluateTrust(agent.session.snapshotEvents(), snapshot, fold, limitedTools)
     } catch (error) {
       // Unreadable state must not break session creation: deny everything with a notice.
-      const reason = `dsh-viztools gate state for this session could not be read (${error instanceof Error ? error.message : String(error)})`
+      const reason = keyFailure ?? `dsh-viztools gate state for this session could not be read (${error instanceof Error ? error.message : String(error)})`
       warn(ctx, reason)
       const broken: AgentGate = { store, sessionId, fold: { ...foldGateRecords([]), malformed: reason }, reserved: new Map(), audited: new Set(), verdicts: new Map(), pending: [] }
       gates.set(agent, broken)
@@ -475,7 +590,11 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
         ...(active?.fold.rules === undefined ? {} : { rules: active.fold.rules }),
         ...(config.runRules.enabled && active?.fold.rulesInvalid !== undefined ? { rulesInvalid: active.fold.rulesInvalid } : {}),
         ...(active?.countsUntrusted === undefined ? {} : { countsUntrusted: active.countsUntrusted }),
-        ...(active?.fold.malformed === undefined ? {} : { stateBroken: active.fold.malformed }),
+        ...(() => {
+          if (active === undefined || caller === undefined) return {}
+          const broken = active.fold.malformed ?? keyExposure(caller)
+          return broken === undefined ? {} : { stateBroken: broken }
+        })(),
         counts: active === undefined ? {} : liveCounts(active),
         tool: exec.name,
         denialMessage: config.planFirst.denialMessage,
@@ -516,6 +635,13 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
       }
       return result
     })
+    // The guard is synchronous: settle the key-protection probe in the async pre-execute stage
+    // (which DSH runs before guards), so a mid-session mode change is probed before deciding.
+    agent.ctx.on('tools/pre-execute', async (_exec, next) => {
+      if (exposedReaders(agent).length > 0) await probeKey(agent).verdict
+      return next()
+    })
+    if (exposedReaders(agent).length > 0) return Promise.resolve(probeKey(agent).verdict).then(() => undefined)
     return undefined
   })
 

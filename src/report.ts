@@ -169,13 +169,20 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const stateRoot = safePath(cwd, config.stateDir, 'report stateDir')
   const gateStateRoot = safePath(cwd, config.gateStateDir, 'report gateStateDir')
   const keyDir = resolve(config.keyDir || defaultKeyDir())
-  assertKeyDirOutside(keyDir, cwd)
+  // An unusable key directory must not crash the profile; reports then fail with a notice.
+  let keyFailure: string | undefined
+  try { assertKeyDirOutside(keyDir, cwd) } catch (error) { keyFailure = error instanceof Error ? error.message : String(error) }
   let keyring: Keyring | undefined
   const stores = new WeakMap<Agent, StateStore>()
   /** Report outcomes live on the plugin `report` channel, never as custom session-log events. */
   const storeFor = (agent: Agent): StateStore => {
     let store = stores.get(agent)
-    if (store === undefined) { keyring ??= loadKeyring(keyDir); store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'report', keyring }); stores.set(agent, store) }
+    if (store === undefined) {
+      if (keyFailure !== undefined) throw new Error(`dsh-viztools cannot use its key directory (${keyFailure})`)
+      keyring ??= loadKeyring(keyDir)
+      store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'report', keyring })
+      stores.set(agent, store)
+    }
     return store
   }
   const append = (agent: Agent, change: ReportChange): void => {
@@ -195,6 +202,12 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
       if (completedReportKeysFromRecords(storeFor(agent).read().records, String(agent.id)).has(key)) return Promise.resolve()
     } catch (error) {
       report(`could not read report history for ${String(agent.id)}`, error)
+      // Fail closed but visibly: the viewer shows why no report was produced.
+      const sessionId = String(agent.id)
+      if (isSafeSessionId(sessionId)) {
+        void publishManagedState(outputRoot, { status: 'failed', sessionId, reason: `Report state is unavailable: ${error instanceof Error ? error.message : String(error)}`, updatedAt: Date.now() })
+          .catch((publishError: unknown) => report(`could not publish failed report state for ${sessionId}`, publishError))
+      }
       return Promise.resolve()
     }
     const existing = inFlight.get(key)

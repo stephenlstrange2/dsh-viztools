@@ -35,11 +35,20 @@ Status: **automated blockers closed; internal acceptance pending** (see `SECURIT
 4. **Repair:** takes the `session.lock` lease or refuses; unique exclusive temp files fsync'd before rename; a fork's inherited events are not re-exported. Tests: `repair`, integration (refused while live).
 5. **Malformed state** denies all tools with a notice instead of crashing agent creation. Tests: `gate-runtime`, `test_managed_view.py`.
 
+## Follow-up on e27dbcf (2026-10-13, PoCs reproduced)
+
+1. **HIGH:** records were not bound to the reader's session, and the anchor head was skipped after a reset. Now the MAC is verified with the reader's session and channel, and the head is always compared, so post-reset truncation of a narrowing rule triggers a new reset. Tests: `state-store`, `gate-runtime`.
+2. **HIGH:** the agent can read the key, because DSH's sandbox only restricts writes. The sidecar is now documented as tamper-evident only against agents that cannot read `$DSH_HOME`, and the gate denies all tools while a file-reading tool is allowed, unless a probe through DSH's sandbox proves the key unreadable. `THREAT_MODEL.md` is corrected. Tests: `gate-runtime`.
+3. **MEDIUM:** an unusable `keyDir` denies all tools with a notice instead of throwing; key creation is race-safe (temp file plus hard link, readers retry). Tests: `gate-runtime`, `state-store`, `report-resume`.
+4. **LOW:** realpath `keyDir` check, owner-only permission checks, at most one record beyond the anchor. Tests: `state-store`, `gate-runtime`.
+5. **Docs:** a751b39 sessions: delete the old sidecar and anchors, restore the original log from the backup, repair again — or start new sessions (README).
+6. **Firefox viewer:** an in-memory storage shim is the first element of the srcdoc `<head>`; the sandbox is unchanged. Tests: `test_managed_view.py` and the integration Firefox phase (two viewer reloads).
+
 ## Evidence
 
 ```text
-pnpm check:            133 TypeScript tests, 31 Python tests passed
-pnpm test:integration: 42/42 checks passed (real DSH 0.2.0-rc.2 web, OTX topology, restart + resume + repair, live-lease refusal)
+pnpm check:            149 TypeScript tests, 33 Python tests passed
+pnpm test:integration: 53/53 checks passed (Chromium + Firefox; restart, resume, repair, live-lease refusal)
 ```
 
 ## Remaining (not automatable here)

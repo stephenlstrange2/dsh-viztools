@@ -1,7 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import * as dshSession from '@deepseek-ai/dsh-session'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { isSafeSessionId } from './managed-state.js'
@@ -92,14 +92,33 @@ export function defaultKeyDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.DSH_HOME !== undefined && env.DSH_HOME !== '' ? env.DSH_HOME : join(homedir(), '.dsh'), 'viztools')
 }
 
+/** Resolve symlinks of the longest existing prefix, so not-yet-created paths compare by realpath too. */
+export function realPathish(path: string): string {
+  let current = resolve(path)
+  const rest: string[] = []
+  for (;;) {
+    try {
+      return join(realpathSync(current), ...rest.reverse())
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      const parent = dirname(current)
+      if (parent === current) return resolve(path)
+      rest.push(basename(current))
+      current = parent
+    }
+  }
+}
+
 function inside(root: string, candidate: string): boolean {
-  const rel = relative(resolve(root), resolve(candidate))
+  const rel = relative(root, candidate)
   return rel === '' || (!rel.startsWith(`..${sep}`) && rel !== '..' && !isAbsolute(rel))
 }
 
-/** Refuse a key directory inside the workspace: the key must not be writable from there. */
+/** Refuse a key directory inside the workspace (compared by realpath): the key must not be writable from there. */
 export function assertKeyDirOutside(keyDir: string, workspace: string): void {
-  if (inside(workspace, keyDir)) throw new Error(`dsh-viztools keyDir must be outside the workspace (${resolve(workspace)}); got ${resolve(keyDir)}`)
+  const key = realPathish(keyDir)
+  const work = realPathish(workspace)
+  if (inside(work, key)) throw new Error(`dsh-viztools keyDir must be outside the workspace (${work}); got ${key}`)
 }
 
 function fsyncDir(dir: string): void {
@@ -122,22 +141,57 @@ export function writeFileAtomicSync(path: string, contents: string | Buffer, mod
   fsyncDir(dirname(path))
 }
 
-/** Load (or create, once, with O_EXCL) the HMAC key in `keyDir`. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/** Owner-only check: no group/other permission bits, owned by this user, not a symlink. */
+export function assertPrivate(path: string, kind: 'directory' | 'file'): void {
+  const info = lstatSync(path)
+  if (info.isSymbolicLink()) throw new Error(`dsh-viztools ${kind} ${path} must not be a symbolic link`)
+  if (kind === 'directory' ? !info.isDirectory() : !info.isFile()) throw new Error(`dsh-viztools ${kind} ${path} is not a ${kind}`)
+  if (process.platform === 'win32') return
+  if ((info.mode & 0o077) !== 0) throw new Error(`dsh-viztools ${kind} ${path} must not be accessible to group or others (mode ${(info.mode & 0o777).toString(8)})`)
+  const uid = process.getuid?.()
+  if (uid !== undefined && info.uid !== uid) throw new Error(`dsh-viztools ${kind} ${path} is owned by uid ${info.uid}, not ${uid}`)
+}
+
+const KEY_HEX_LENGTH = 64
+
+/**
+ * Load (or create once) the HMAC key in `keyDir`. Creation is race-safe: the key is written
+ * and fsync'd to a unique temp file, then hard-linked into place (the link fails if another
+ * process won), so the key file is never observed partially written. Readers still retry
+ * briefly on an empty or short file, which older writers could leave behind. The directory
+ * and the file must be owner-only.
+ */
 export function loadKeyring(keyDir: string = defaultKeyDir()): Keyring {
-  const dir = resolve(keyDir)
-  const path = join(dir, 'sidecar.key')
+  const dir = realPathish(keyDir)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  assertPrivate(dir, 'directory')
+  const path = join(dir, 'sidecar.key')
   if (!existsSync(path)) {
+    const temporary = join(dir, `.sidecar.key.${process.pid}.${randomBytes(6).toString('hex')}`)
+    const fd = openSync(temporary, 'wx', 0o600)
+    try { writeSync(fd, randomBytes(32).toString('hex')); fsyncSync(fd) } finally { closeSync(fd) }
     try {
-      const fd = openSync(path, 'wx', 0o600)
-      try { writeSync(fd, randomBytes(32).toString('hex')); fsyncSync(fd) } finally { closeSync(fd) }
-      fsyncDir(dir)
+      linkSync(temporary, path)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    } finally {
+      unlinkSync(temporary)
     }
+    fsyncDir(dir)
   }
-  const key = Buffer.from(readFileSync(path, 'utf8').trim(), 'hex')
-  if (key.length < 32) throw new Error(`dsh-viztools key at ${path} is invalid`)
+  let text = ''
+  for (let attempt = 0; attempt < 50; attempt++) {
+    text = readFileSync(path, 'utf8').trim()
+    if (text.length >= KEY_HEX_LENGTH) break
+    sleepSync(20)
+  }
+  assertPrivate(path, 'file')
+  const key = Buffer.from(text, 'hex')
+  if (text.length < KEY_HEX_LENGTH || key.length < 32) throw new Error(`dsh-viztools key at ${path} is empty or invalid`)
   return { dir, key }
 }
 
@@ -163,12 +217,17 @@ function same(a: string, b: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right)
 }
 
-function recordMac(key: Buffer, channel: StoreChannel, record: Omit<StoredRecord, 'mac'>): string {
-  return hmac(key, { v: 1, channel, session: record.session, i: record.i, prev: record.prev, t: record.t, logSeq: record.logSeq, kind: record.kind, data: record.data })
+/**
+ * MAC input binds the record to its session AND channel. Verification recomputes it with the
+ * READER's expected session id, never the id the record claims, so a record copied from
+ * another session's (or channel's) sidecar fails authentication.
+ */
+function recordMac(key: Buffer, channel: StoreChannel, session: string, record: Omit<StoredRecord, 'mac'>): string {
+  return hmac(key, { v: 1, channel, session, i: record.i, prev: record.prev, t: record.t, logSeq: record.logSeq, kind: record.kind, data: record.data })
 }
 
 function sign(key: Buffer, channel: StoreChannel, record: Omit<StoredRecord, 'mac'>): StoredRecord {
-  return { ...record, mac: recordMac(key, channel, record) }
+  return { ...record, mac: recordMac(key, channel, record.session, record) }
 }
 
 interface ChainResult {
@@ -196,7 +255,11 @@ function decodeRecord(value: unknown): StoredRecord | undefined {
  * ignored until a MAC-valid `reset` record (prev '') restarts it, so a damaged session never
  * silently regains trust but can still record new evidence.
  */
-export function verifyChain(lines: readonly string[], keyring: Keyring, channel: StoreChannel, tornTail = false): ChainResult {
+/**
+ * @param expectedSession - the session whose chain this is; a record claiming another session
+ *   (or a function deciding per record, for in-log plugin records that span a fork) is rejected.
+ */
+export function verifyChain(lines: readonly string[], keyring: Keyring, channel: StoreChannel, expectedSession: string | ((record: StoredRecord) => string | undefined), tornTail = false): ChainResult {
   // A torn final line is a write the crash interrupted. Records are anchored only after they
   // are durable, so it never held anchored state; the anchor check catches real truncation.
   const complete = tornTail ? lines.slice(0, -1) : lines
@@ -209,7 +272,8 @@ export function verifyChain(lines: readonly string[], keyring: Keyring, channel:
   for (const [position, line] of complete.entries()) {
     let record: StoredRecord | undefined
     try { record = decodeRecord(JSON.parse(line)) } catch { record = undefined }
-    const authentic = record !== undefined && same(record.mac, recordMac(keyring.key, channel, record))
+    const owner = record === undefined ? undefined : typeof expectedSession === 'string' ? expectedSession : expectedSession(record)
+    const authentic = record !== undefined && owner !== undefined && record.session === owner && same(record.mac, recordMac(keyring.key, channel, owner, record))
     if (record !== undefined && authentic && record.kind === 'reset' && record.prev === '') {
       // Our own marker that earlier damage was detected: restart the chain here and keep the
       // store flagged as damaged, so trust in pre-reset counts is never restored.
@@ -291,11 +355,17 @@ function readSidecar(path: string): { lines: string[]; tornTail: boolean; exists
   return { lines, tornTail, exists: true }
 }
 
-/** Check the verified chain against its anchor: the anchored head must be present. */
+/**
+ * Check the verified chain against its anchor. This runs even when the chain itself is
+ * damaged (after a reset): the anchored head must be present, so truncating post-reset
+ * records (for example a later, narrowing rules approval) is detected. At most ONE MAC-valid
+ * record may lie beyond the anchor (a crash between the record and the anchor write).
+ */
 function anchored(chain: ChainResult, anchor: Anchor | 'invalid' | undefined, hasRecords: boolean): StoreIntegrity {
-  if (chain.integrity.status !== 'ok') return chain.integrity
   if (anchor === 'invalid') return { status: 'truncated', reason: 'the out-of-workspace anchor fails authentication' }
   if (anchor === undefined) return hasRecords ? { status: 'truncated', reason: 'records exist but their out-of-workspace anchor is missing' } : { status: 'ok' }
+  const beyond = chain.records.filter((record) => record.i > anchor.last).length
+  if (beyond > 1) return { status: 'truncated', reason: `${beyond} records lie beyond the out-of-workspace anchor (at most one is possible)` }
   if (anchor.last < 0) return { status: 'ok' }
   const head = chain.records.find((record) => record.i === anchor.last)
   if (head === undefined) return hasRecords ? { status: 'truncated', reason: `records up to #${anchor.last} were written but are missing` } : { status: 'missing', reason: 'the sidecar is missing although its anchor records written state' }
@@ -309,29 +379,31 @@ function worst(a: StoreIntegrity, b: StoreIntegrity): StoreIntegrity {
 
 const MAX_LINEAGE = 32
 
-interface SidecarRead { records: StoredRecord[]; integrity: StoreIntegrity; exists: boolean }
+interface SidecarRead { records: StoredRecord[]; integrity: StoreIntegrity; exists: boolean; anchorOk: boolean }
 
 /** Read one session's verified sidecar, recursively including its fork ancestors up to `cut`. */
 function readLineage(root: string, keyring: Keyring, channel: StoreChannel, sessionId: string, cut: number | undefined, header: { parent?: string; cut?: number } | undefined, seen: Set<string>): SidecarRead {
-  if (seen.has(sessionId) || seen.size >= MAX_LINEAGE) return { records: [], integrity: { status: 'truncated', reason: 'fork lineage is cyclic or too deep' }, exists: true }
+  if (seen.has(sessionId) || seen.size >= MAX_LINEAGE) return { records: [], integrity: { status: 'truncated', reason: 'fork lineage is cyclic or too deep' }, exists: true, anchorOk: false }
   seen.add(sessionId)
   const anchor = readAnchor(keyring, sessionId, channel)
   const lineage = header ?? (anchor !== undefined && anchor !== 'invalid' && anchor.parent !== undefined ? { parent: anchor.parent, ...(anchor.cut === undefined ? {} : { cut: anchor.cut }) } : undefined)
-  let inherited: SidecarRead = { records: [], integrity: { status: 'ok' }, exists: false }
+  let inherited: SidecarRead = { records: [], integrity: { status: 'ok' }, exists: false, anchorOk: true }
   if (lineage?.parent !== undefined) {
     inherited = isSafeSessionId(lineage.parent)
       ? readLineage(root, keyring, channel, lineage.parent, lineage.cut, undefined, seen)
-      : { records: [], integrity: { status: 'truncated', reason: 'fork parent id is not a safe session id' }, exists: true }
+      : { records: [], integrity: { status: 'truncated', reason: 'fork parent id is not a safe session id' }, exists: true, anchorOk: false }
   }
   const raw = readSidecar(sidecarPath(root, sessionId, channel))
-  const chain = verifyChain(raw.lines, keyring, channel, raw.tornTail)
-  const integrity = worst(inherited.integrity, anchored(chain, anchor, chain.records.length > 0 || raw.lines.length > 0))
+  const chain = verifyChain(raw.lines, keyring, channel, sessionId, raw.tornTail)
+  const anchorIntegrity = anchored(chain, anchor, chain.records.length > 0 || raw.lines.length > 0)
+  const integrity = worst(inherited.integrity, worst(chain.integrity, anchorIntegrity))
   const own = chain.records
   const all = [...inherited.records, ...own]
   return {
     records: cut === undefined ? all : all.filter((record) => record.logSeq <= cut),
     integrity,
     exists: inherited.exists || raw.lines.length > 0 || (anchor !== undefined && anchor !== 'invalid' && anchor.last >= 0),
+    anchorOk: inherited.anchorOk && anchorIntegrity.status === 'ok',
   }
 }
 
@@ -359,9 +431,12 @@ export function createSidecarStore(rootDir: string, session: StoreSession, chann
       }
       const result = readLineage(root, keyring, channel, sessionId, undefined, parent === undefined ? undefined : lineageHeader(), new Set())
       const raw = readSidecar(path)
-      const chain = verifyChain(raw.lines, keyring, channel, raw.tornTail)
-      cursor = { i: chain.next.i, prev: chain.next.prev, needsReset: chain.needsReset || result.integrity.status !== 'ok', tornTail: chain.tornTail }
-      return { records: result.records, integrity: result.integrity, resynced: chain.resynced, exists: result.exists }
+      const chain = verifyChain(raw.lines, keyring, channel, sessionId, raw.tornTail)
+      // A reset only "resyncs" while the anchor still confirms everything after it; anchor
+      // damage after a reset needs another reset (voiding approval and rules again).
+      const resynced = chain.resynced && result.anchorOk
+      cursor = { i: chain.next.i, prev: chain.next.prev, needsReset: (chain.needsReset || result.integrity.status !== 'ok') && !resynced, tornTail: chain.tornTail }
+      return { records: result.records, integrity: result.integrity, resynced, exists: result.exists }
     },
     append(kind, data) {
       if (cursor === undefined) this.read()
@@ -416,12 +491,18 @@ export function createPluginRecordStore(session: StoreSession, channel: StoreCha
     read() {
       // Forks carry the parent's records in the seeded log, so the chain spans the lineage.
       const all = lines()
-      const chain = verifyChain(all, keyring, channel)
+      // Inherited records (inside the fork prefix) belong to the session that wrote them; every
+      // later record must belong to this session.
+      const cut = Number(session.inheritedEventCount)
+      const owner = (record: StoredRecord): string | undefined => record.session === sessionId || record.logSeq <= cut ? record.session : undefined
+      const chain = verifyChain(all, keyring, channel, owner)
       const anchor = readAnchor(keyring, sessionId, channel)
       const own = chain.records.some((record) => record.session === sessionId)
-      const integrity = own ? anchored(chain, anchor, true) : chain.integrity
-      cursor = { i: chain.next.i, prev: chain.next.prev, needsReset: chain.needsReset || integrity.status !== 'ok' }
-      return { records: chain.records, integrity, resynced: chain.resynced, exists: all.length > 0 || (anchor !== undefined && anchor !== 'invalid') }
+      const anchorIntegrity: StoreIntegrity = own || anchor !== undefined ? anchored({ ...chain, records: chain.records.filter((record) => record.session === sessionId) }, anchor, own) : { status: 'ok' }
+      const integrity = worst(chain.integrity, anchorIntegrity)
+      const resynced = chain.resynced && anchorIntegrity.status === 'ok'
+      cursor = { i: chain.next.i, prev: chain.next.prev, needsReset: (chain.needsReset || integrity.status !== 'ok') && !resynced }
+      return { records: chain.records, integrity, resynced, exists: all.length > 0 || (anchor !== undefined && anchor !== 'invalid') }
     },
     append(kind, data) {
       if (cursor === undefined) this.read()

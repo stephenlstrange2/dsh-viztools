@@ -7,10 +7,10 @@ import { describe, expect, it } from 'vitest'
 import { publishManagedState, managedStatePath } from '../src/managed-state.js'
 import * as report from '../src/report.js'
 
-async function boot(cwd: string) {
+async function boot(cwd: string, extra: Record<string, unknown> = {}) {
   const ctx = new Context()
   ctx.provide('sessionPersistence', { flush: async () => undefined } as never)
-  await ctx.plugin(report as never, { enabled: true, cwd, outputDir: '.dsh/reports', triggerTools: ['mcp__otx__finalize_run'] } as never).await()
+  await ctx.plugin(report as never, { enabled: true, cwd, outputDir: '.dsh/reports', triggerTools: ['mcp__otx__finalize_run'], ...extra } as never).await()
   return ctx
 }
 
@@ -58,5 +58,13 @@ describe('report state across resume', () => {
       process.off('unhandledRejection', listener)
     }
     expect(unhandled).toEqual([])
+  })
+
+  it('loads with an unusable keyDir (inside the workspace) instead of throwing', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'viztools-resume-'))
+    const ctx = await boot(cwd, { keyDir: join(cwd, '.keys') })
+    created(ctx, 'keyless')
+    await settle()
+    expect(JSON.parse(await readFile(managedStatePath(join(cwd, '.dsh/reports'), 'keyless'), 'utf8')).status).toBe('pending')
   })
 })

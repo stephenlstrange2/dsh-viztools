@@ -129,7 +129,95 @@ describe('keyed plugin state sidecar', () => {
 
   it('verifyChain accepts an empty log', async () => {
     const { keyring } = await fixture()
-    expect(verifyChain([], keyring, 'gate').integrity).toEqual({ status: 'ok' })
+    expect(verifyChain([], keyring, 'gate', 's0').integrity).toEqual({ status: 'ok' })
+  })
+})
+
+describe('follow-up hardening (e27dbcf PoCs)', () => {
+  it('binds records to their session: a donor session\'s MAC-valid record is rejected in another chain', async () => {
+    const { root, keyring } = await fixture()
+    const donor = createSidecarStore(root, session('donor'), 'gate', keyring)
+    const approval = donor.append('plan-approved', { planCallId: 'p' })
+    const victim = createSidecarStore(root, session('victim'), 'gate', keyring)
+    victim.append('refused', {})
+    const lines = (await readFile(victim.location, 'utf8')).trim().split('\n')
+    const last = JSON.parse(lines[0] as string)
+    // Keep the donor's MAC but re-point the chain link and claimed session.
+    await appendFile(victim.location, `${JSON.stringify({ ...approval, i: 1, prev: last.mac, session: 'victim' })}\n${JSON.stringify({ ...approval, i: 1, prev: last.mac })}\n`)
+    const snapshot = createSidecarStore(root, session('victim'), 'gate', keyring).read()
+    expect(snapshot.integrity.status).toBe('truncated')
+    expect(snapshot.records.map((record) => record.kind)).toEqual(['refused'])
+  })
+
+  it('binds records to their channel: a gate record replayed on the report channel is rejected', async () => {
+    const { root, keyring } = await fixture()
+    const gate = createSidecarStore(root, session('c1'), 'gate', keyring)
+    const record = gate.append('plan-approved', {})
+    const report = createSidecarStore(root, session('c1'), 'report', keyring)
+    await writeFile(report.location, `${JSON.stringify(record)}\n`)
+    writeAnchor(keyring, { session: 'c1', channel: 'report', last: 0, head: record.mac })
+    expect(createSidecarStore(root, session('c1'), 'report', keyring).read().integrity).toMatchObject({ status: 'truncated', reason: expect.stringMatching(/fails authentication/) })
+  })
+
+  it('still verifies sidecars written by e27dbcf (same MAC input for the record\'s own session)', async () => {
+    const { root, keyring } = await fixture()
+    const { createHmac } = await import('node:crypto')
+    const body = { i: 0, prev: '', t: 1, logSeq: 3, kind: 'plan-approved', data: { planCallId: 'p' }, session: 'old' }
+    const mac = createHmac('sha256', keyring.key).update(JSON.stringify({ v: 1, channel: 'gate', session: body.session, i: body.i, prev: body.prev, t: body.t, logSeq: body.logSeq, kind: body.kind, data: body.data })).digest('hex')
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(root, { recursive: true })
+    await writeFile(join(root, 'old.gate.jsonl'), `${JSON.stringify({ ...body, mac })}\n`)
+    writeAnchor(keyring, { session: 'old', channel: 'gate', last: 0, head: mac })
+    expect(createSidecarStore(root, session('old'), 'gate', keyring).read()).toMatchObject({ integrity: { status: 'ok' }, records: [{ kind: 'plan-approved' }] })
+  })
+
+  it('accepts at most one MAC-valid record beyond the anchor', async () => {
+    const { root, keyring } = await fixture()
+    const store = createSidecarStore(root, session('b1'), 'gate', keyring)
+    const first = store.append('a', {})
+    store.append('b', {})
+    store.append('c', {})
+    // Roll the anchor back two records (e.g. an anchor restored from an older backup).
+    writeAnchor(keyring, { session: 'b1', channel: 'gate', last: first.i, head: first.mac })
+    expect(createSidecarStore(root, session('b1'), 'gate', keyring).read().integrity).toMatchObject({ status: 'truncated', reason: expect.stringMatching(/beyond the out-of-workspace anchor/) })
+  })
+
+  it('creates the key race-safely (temp + link) and retries on an empty key file', async () => {
+    const { base } = await fixture()
+    const dir = join(base, 'race', 'viztools')
+    const created = loadKeyring(dir)
+    expect(loadKeyring(dir).key.equals(created.key)).toBe(true)
+    const { readdir: list } = await import('node:fs/promises')
+    expect((await list(dir)).filter((name) => name.startsWith('.sidecar.key.'))).toEqual([])
+    // An older writer left an empty key file that another process fills in shortly.
+    const slow = join(base, 'slow', 'viztools')
+    const { mkdirSync, writeFileSync } = await import('node:fs')
+    mkdirSync(slow, { recursive: true, mode: 0o700 })
+    writeFileSync(join(slow, 'sidecar.key'), '', { mode: 0o600 })
+    const { Worker } = await import('node:worker_threads')
+    const worker = new Worker(`setTimeout(() => { require('node:fs').writeFileSync(${JSON.stringify(join(slow, 'sidecar.key'))}, 'b'.repeat(64)) }, 100)`, { eval: true })
+    expect(loadKeyring(slow).key.toString('hex')).toBe('b'.repeat(64))
+    await worker.terminate()
+  })
+
+  it('checks key directory and key file permissions and ownership on load', async () => {
+    const { base } = await fixture()
+    const { chmod } = await import('node:fs/promises')
+    const dir = join(base, 'perm', 'viztools')
+    loadKeyring(dir)
+    await chmod(dir, 0o750)
+    expect(() => loadKeyring(dir)).toThrow(/must not be accessible to group or others/)
+    await chmod(dir, 0o700)
+    await chmod(join(dir, 'sidecar.key'), 0o640)
+    expect(() => loadKeyring(dir)).toThrow(/must not be accessible to group or others/)
+  })
+
+  it('compares the key directory with the workspace by realpath', async () => {
+    const { base } = await fixture()
+    const { mkdir, symlink } = await import('node:fs/promises')
+    await mkdir(join(base, 'workspace'), { recursive: true })
+    await symlink(join(base, 'workspace'), join(base, 'alias'))
+    expect(() => assertKeyDirOutside(join(base, 'alias', 'keys'), join(base, 'workspace'))).toThrow(/outside the workspace/)
   })
 })
 

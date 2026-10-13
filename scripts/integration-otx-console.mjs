@@ -23,7 +23,7 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const fixtures = join(repo, 'test', 'integration', 'otx-console')
 const keep = process.argv.includes('--keep')
 const require = createRequire(join(process.env.PLAYWRIGHT_CORE_DIR ?? join(homedir(), '.hermes', 'hermes-agent', 'node_modules'), 'noop.js'))
-const { chromium } = require('playwright-core')
+const { chromium, firefox } = require('playwright-core')
 const chromiumPath = process.env.CHROMIUM_PATH ?? join(homedir(), '.cache', 'ms-playwright', 'chromium_headless_shell-1243', 'chrome-headless-shell-linux64', 'chrome-headless-shell')
 
 const failures = []
@@ -330,6 +330,60 @@ try {
   }
   await page2.screenshot({ path: join(logs, 'resume.png') })
   check('report iframe in the right sidebar is at least 60% of the viewport height (1910x916)', frameHeight >= 0.6 * 916, `height=${Math.round(frameHeight)}px`)
+
+  // Firefox: the sandboxed srcdoc report must survive viewer reloads (sidebar tab switches).
+  // In an opaque-origin frame Firefox throws SecurityError from the localStorage /
+  // sessionStorage getters (and indexedDB.open); marimo then lands in its error boundary
+  // ("Something went wrong — The operation is insecure"). The in-memory storage shim must keep
+  // the sandbox intact AND make storage access succeed. The viewer document is loaded as a
+  // page and reloaded, which is what reloading the sidebar tab does to the viewer frame.
+  const fox = await firefox.launch({ ...(process.env.FIREFOX_PATH ? { executablePath: process.env.FIREFOX_PATH } : {}) })
+  const settle = (promise, ms = 5000) => Promise.race([promise, new Promise((resolveLater) => setTimeout(() => resolveLater('TIMEOUT'), ms))])
+  try {
+    const foxPage = await fox.newPage({ viewport: { width: 1910, height: 916 } })
+    const foxErrors = []
+    foxPage.on('console', (message) => { if (/operation is insecure|Something went wrong/i.test(message.text())) foxErrors.push(message.text().slice(0, 200)) })
+    await foxPage.goto(url2, { waitUntil: 'load' }) // authenticates this Firefox context with DSH
+    const sidebarFox = await foxPage.request.get(`${new URL(url2).origin}/api/viztools/sidebar-url?session=${encodeURIComponent(sessionId)}`)
+    const viewerUrl = (await sidebarFox.json().catch(() => ({}))).browserUrl
+    check('Firefox: the authenticated sidebar route returns the viewer URL', typeof viewerUrl === 'string')
+    const inspect = async () => {
+      let state = { text: '', storage: '', sandbox: '' }
+      for (let i = 0; i < 40 && !/DSH session report|Something went wrong/.test(state.text); i++) {
+        await foxPage.waitForTimeout(750)
+        const inner = foxPage.frames().find((frame) => frame !== foxPage.mainFrame())
+        const outer = await settle(foxPage.evaluate(() => ({ text: document.body.innerText, sandbox: document.querySelector('iframe[data-viztools-report]')?.getAttribute('sandbox') ?? '' })).catch(() => ({ text: '', sandbox: '' })))
+        const innerState = inner === undefined ? 'TIMEOUT' : await settle(inner.evaluate(() => {
+          const probe = []
+          for (const name of ['localStorage', 'sessionStorage']) {
+            try { window[name].setItem('viztools-probe', '1'); probe.push(`${name}:ok`) } catch (error) { probe.push(`${name}:${error.name}`) }
+          }
+          return { text: document.body.innerText, storage: probe.join(',') }
+        }).catch(() => 'TIMEOUT'))
+        state = {
+          text: `${outer === 'TIMEOUT' ? '' : outer.text}\n${innerState === 'TIMEOUT' ? '' : innerState.text}`,
+          storage: innerState === 'TIMEOUT' ? '' : innerState.storage,
+          sandbox: outer === 'TIMEOUT' ? '' : outer.sandbox,
+        }
+      }
+      return state
+    }
+    if (typeof viewerUrl === 'string') {
+      await foxPage.goto(viewerUrl, { waitUntil: 'load' })
+      for (const round of [0, 1, 2]) {
+        if (round > 0) await settle(foxPage.reload({ waitUntil: 'load' }), 20_000)
+        const state = await inspect()
+        const label = round === 0 ? 'first load' : `viewer reload #${round}`
+        check(`Firefox (${label}): the report shows "DSH session report" and no "Something went wrong"`, /DSH session report/.test(state.text) && !/Something went wrong|operation is insecure/i.test(state.text), state.text.slice(0, 140).replace(/\s+/g, ' '))
+        check(`Firefox (${label}): storage access in the sandboxed report no longer throws`, state.storage === 'localStorage:ok,sessionStorage:ok', state.storage)
+        check(`Firefox (${label}): the report frame keeps its opaque-origin sandbox`, state.sandbox === 'allow-scripts allow-popups allow-downloads', state.sandbox)
+      }
+      await settle(foxPage.screenshot({ path: join(logs, 'firefox.png') }), 10_000)
+    }
+    check('Firefox: no "operation is insecure" error reached the console', foxErrors.length === 0, foxErrors.join(' | '))
+  } finally {
+    await settle(fox.close(), 10_000)
+  }
   const resumed = JSON.parse(await readFile(statePath, 'utf8'))
   check('resume keeps the available report state', resumed.status === 'available', JSON.stringify(resumed))
   const servedAgain = await page2.request.get(`${new URL(url2).origin}${state?.url ?? ''}`)

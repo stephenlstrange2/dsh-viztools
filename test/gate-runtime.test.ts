@@ -25,7 +25,7 @@ interface Harness {
   ran: string[]
 }
 
-async function harness(config: GateInput, options: { planMode?: boolean; tools?: string[]; pluginRecords?: PluginRecordApi | null; root?: string; sandboxPolicy?: Record<string, unknown> } = {}): Promise<Harness> {
+async function harness(config: GateInput, options: { planMode?: boolean; tools?: string[]; pluginRecords?: PluginRecordApi | null; root?: string; sandboxPolicy?: Record<string, unknown>; confinedReads?: boolean } = {}): Promise<Harness> {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'viztools-gate-'))
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {} as never).await()
@@ -33,6 +33,11 @@ async function harness(config: GateInput, options: { planMode?: boolean; tools?:
   ctx.provide('userQuestions', { ask: async (request: { questions: { id: string }[] }) => ({ answers: request.questions.map((q) => ({ id: q.id, selected: ['Approve'] })) }) } as never)
   if (options.planMode !== false) ctx.provide('planMode', { set: () => 'committed' } as never)
   if (options.sandboxPolicy !== undefined) ctx.provide('sandboxPolicy', options.sandboxPolicy as never)
+  if (options.confinedReads === true) {
+    // A read-confining sandbox: confined processes cannot read anything under the DSH home.
+    const home = process.env.DSH_HOME as string
+    ctx.provide('sandbox', { confine: async (argv: readonly string[]) => ({ argv: argv.some((arg) => arg.startsWith(home)) ? ['false'] : [...argv] }) } as never)
+  }
   const ran: string[] = []
   for (const name of options.tools ?? ['bench_status', 'replay', 'diff', 'subagent']) ctx.tools.register(ok(name, () => { ran.push(name); return { ok: true } }))
   ctx.tools.register(ok('exit_plan_mode', () => ({ approved: true })))
@@ -186,9 +191,108 @@ describe('keyed chain and out-of-workspace anchor (item 1, PoCs)', () => {
     expect(restarted.ran).toEqual([])
   })
 
-  it('refuses to start with a key directory inside the workspace', async () => {
+  it('a key directory inside the workspace (also via a symlink) denies all with a notice instead of throwing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'viztools-gate-'))
-    await expect(harness({ ...otx(), keyDir: join(root, '.keys') }, { root })).rejects.toThrow(/keyDir must be outside the workspace/)
+    const h = await harness({ ...otx(), keyDir: join(root, '.keys') }, { root })
+    const agent = await h.agent('kd1')
+    expect((await h.call(agent, 'bench_status', 'b')).text).toMatch(/cannot use its key directory.*outside the workspace.*Every tool is refused/)
+    const { symlink } = await import('node:fs/promises')
+    const outside = await mkdtemp(join(tmpdir(), 'viztools-outside-'))
+    await symlink(root, join(outside, 'ws-link'))
+    // keyDir looks outside, but realpath puts it inside the workspace.
+    const linked = await harness({ ...otx(), keyDir: join(outside, 'ws-link', 'keys') }, { root })
+    expect((await linked.call(await linked.agent('kd2'), 'bench_status', 'b')).text).toMatch(/outside the workspace/)
+  })
+
+  it('a key directory or key file with group/other access denies all with a notice', async () => {
+    const { chmod, mkdir } = await import('node:fs/promises')
+    const keyDir = await mkdtemp(join(tmpdir(), 'viztools-keys-'))
+    await chmod(keyDir, 0o755)
+    const h = await harness({ ...otx(), keyDir })
+    expect((await h.call(await h.agent('kp1'), 'bench_status', 'b')).text).toMatch(/must not be accessible to group or others/)
+    const keyDir2 = join(await mkdtemp(join(tmpdir(), 'viztools-keys-')), 'k')
+    await mkdir(keyDir2, { mode: 0o700 })
+    await writeFile(join(keyDir2, 'sidecar.key'), 'a'.repeat(64), { mode: 0o644 })
+    const h2 = await harness({ ...otx(), keyDir: keyDir2 })
+    expect((await h2.call(await h2.agent('kp2'), 'bench_status', 'b')).text).toMatch(/must not be accessible to group or others/)
+  })
+})
+
+describe('key readable by tool subprocesses (item 2)', () => {
+  const readers = (extra: Partial<GateInput> = {}): GateInput => ({ planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['bash', 'replay'], maxLimits: { replay: 2 } }, ...extra })
+
+  it('denies every tool when a file-reading tool is allowed and no sandbox proves the key unreadable', async () => {
+    const h = await harness(readers(), { tools: ['bash', 'replay'] })
+    const agent = await h.agent('r1')
+    for (const tool of ['replay', 'bash']) expect((await h.call(agent, tool, `c-${tool}`)).text).toMatch(/tamper-evident only against agents that cannot read .*bash can read files/)
+    expect(h.ran).toEqual([])
+  })
+
+  it('allows the deployment when DSH\'s sandbox demonstrably denies reads of the key directory', async () => {
+    const h = await harness(readers(), { tools: ['bash', 'replay'], confinedReads: true, sandboxPolicy: { defaultMode: 'workspace-write' } })
+    const agent = await h.agent('r2')
+    expect((await h.call(agent, 'replay', 'c')).isError).toBe(false)
+  })
+
+  it('a sandbox that confines nothing fails the probe (control readable, key readable)', async () => {
+    const h = await harness(readers(), { tools: ['bash', 'replay'], sandboxPolicy: { defaultMode: 'workspace-write' } })
+    h.ctx.provide('sandbox', { confine: async (argv: readonly string[]) => ({ argv: [...argv] }) } as never)
+    const agent = await h.agent('r3')
+    expect((await h.call(agent, 'replay', 'c')).text).toMatch(/tamper-evident only/)
+  })
+
+  it('treats the deployment\'s own reader list as authoritative (MCP readers)', async () => {
+    const h = await harness({ ...readers(), runRules: { enabled: true, allowedTools: ['replay', 'diff'], maxLimits: { replay: 2 } }, keyProtection: { fileReadingTools: ['diff'] } })
+    expect((await h.call(await h.agent('r4'), 'replay', 'c')).text).toMatch(/diff can read files/)
+  })
+
+  it('does not interfere when no file-reading tool is allowed (the OTX console)', async () => {
+    const h = await harness(otx())
+    const agent = await h.agent('r5')
+    expect((await h.call(agent, 'bench_status', 'b')).isError).toBe(false)
+  })
+})
+
+describe('session and channel binding (item 1, PoCs)', () => {
+  it('records copied from another session\'s sidecar fail authentication', async () => {
+    const h = await harness(otx())
+    const victim = await h.agent('b-victim')
+    const donor = await h.agent('b-donor')
+    await h.call(donor, 'exit_plan_mode', 'plan')
+    const dir = join(h.root, '.dsh/viztools/state')
+    // PoC: graft the donor's approval (MAC-valid for the donor) onto the victim's chain.
+    const victimLines = (await readFile(join(dir, 'b-victim.gate.jsonl'), 'utf8').catch(() => '')).trim().split('\n').filter(Boolean)
+    const donorApproval = (await readFile(join(dir, 'b-donor.gate.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line)).find((record: { kind: string }) => record.kind === 'plan-approved')
+    const last = victimLines.length === 0 ? undefined : JSON.parse(victimLines.at(-1) as string)
+    const grafted = { ...donorApproval, i: last === undefined ? 0 : last.i + 1, prev: last?.mac ?? '' }
+    await writeFile(join(dir, 'b-victim.gate.jsonl'), `${[...victimLines, JSON.stringify(grafted)].join('\n')}\n`)
+    const restarted = await harness(otx(), { root: h.root })
+    const resumed = await restarted.agent('b-victim', Session.create('b-victim' as never, victim.session.snapshotEvents()))
+    expect((await restarted.call(resumed, 'diff', 'd')).text).toMatch(/Plan not approved yet/)
+  })
+
+  it('after a reset, truncating a later narrowing rules approval is detected and voids approval and rules again', async () => {
+    const config: GateInput = { planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['replay', 'diff'], maxLimits: { replay: 2 } } }
+    const h = await harness(config)
+    const agent = await h.agent('t1')
+    await h.call(agent, 'replay', 'r0')
+    const dir = join(h.root, '.dsh/viztools/state')
+    // Damage the chain so the next open writes a reset.
+    const original = (await readFile(join(dir, 't1.gate.jsonl'), 'utf8')).trim().split('\n')
+    await writeFile(join(dir, 't1.gate.jsonl'), `${original.slice(0, -1).join('\n')}\n`)
+    const second = await harness(config, { root: h.root })
+    const resumed = await second.agent('t1', Session.create('t1' as never, agent.session.snapshotEvents()))
+    const propose = (callId: string, deny: string[]) => second.ctx.tools.execute({ callId: callId as never, name: 'propose_run_rules', arguments: { deny, limits: {}, notes: [] }, agent: resumed as never, signal: new AbortController().signal })
+    expect((await propose('broad', [])).isError).toBe(false)
+    expect((await propose('narrow', ['diff'])).isError).toBe(false)
+    expect((await second.call(resumed, 'diff', 'd1')).text).toMatch(/Approved run rules deny tool diff/)
+    // PoC: drop the narrowing approval (the last record) from the post-reset tail.
+    const lines = (await readFile(join(dir, 't1.gate.jsonl'), 'utf8')).trim().split('\n')
+    await writeFile(join(dir, 't1.gate.jsonl'), `${lines.slice(0, -1).join('\n')}\n`)
+    const third = await harness(config, { root: h.root })
+    const again = await third.agent('t1', Session.create('t1' as never, agent.session.snapshotEvents()))
+    expect((await third.call(again, 'diff', 'd2')).text).toMatch(/every governed tool is refused|Approved run rules deny/)
+    expect(third.ran).toEqual([])
   })
 })
 
@@ -201,7 +305,7 @@ describe('run_code is governed (fix 3)', () => {
   })
 
   it('opt-in allows it only under a confined file policy', async () => {
-    const h = await harness(otx({ planFirst: { enabled: true, planningTools: ['bench_status'], allowPtcTransport: true }, runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'diff', 'run_code'], maxLimits: { replay: 2 } } }))
+    const h = await harness(otx({ planFirst: { enabled: true, planningTools: ['bench_status'], allowPtcTransport: true }, runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'diff', 'run_code'], maxLimits: { replay: 2 } } }), { confinedReads: true })
     const confined = await h.agent('p2')
     setSandbox(confined, 'workspace-write')
     const allowed = await h.call(confined, 'run_code', 'c1')
@@ -209,9 +313,11 @@ describe('run_code is governed (fix 3)', () => {
     expect(allowed.text).not.toMatch(/refused|denies|not approved/)
     const open = await h.agent('p3')
     setSandbox(open, 'danger-full-access')
-    expect((await h.call(open, 'run_code', 'c2')).text).toMatch(/danger-full-access/)
+    // Under full access the key is readable, so with a file reader allowed everything is refused.
+    expect((await h.call(open, 'run_code', 'c2')).text).toMatch(/tamper-evident only against agents that cannot read/)
     const unknown = await h.agent('p4')
-    expect((await h.call(unknown, 'run_code', 'c3')).text).toMatch(/unknown/)
+    // An unknown file policy cannot prove the key unreadable either.
+    expect((await h.call(unknown, 'run_code', 'c3')).text).toMatch(/tamper-evident only against agents that cannot read/)
   })
 
   it('after approval it is subject to the deployment allowlist like any tool', async () => {
@@ -226,7 +332,7 @@ describe('run_code before approval also honours the allowlist, invalid rules, an
   const ptc = (extra: Partial<GateInput> = {}) => otx({ planFirst: { enabled: true, planningTools: ['bench_status'], allowPtcTransport: true }, ...extra })
 
   it('is refused before approval when run_code is not in allowedTools, even with the opt-in and a confined policy', async () => {
-    const h = await harness(ptc())
+    const h = await harness(ptc(), { confinedReads: true })
     const agent = await h.agent('q1')
     setSandbox(agent, 'workspace-write')
     expect((await h.call(agent, 'run_code', 'c')).text).toMatch(/Deployment policy denies tool run_code/)
@@ -234,24 +340,24 @@ describe('run_code before approval also honours the allowlist, invalid rules, an
 
   it('is refused before approval while saved rules are invalid', async () => {
     const config = ptc({ runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 2 } } })
-    const h = await harness(config)
+    const h = await harness(config, { confinedReads: true })
     const agent = await h.agent('q2')
     setSandbox(agent, 'workspace-write')
     await h.ctx.tools.execute({ callId: 'rules' as never, name: 'propose_run_rules', arguments: { deny: [], limits: { replay: 2 }, notes: [] }, agent: agent as never, signal: new AbortController().signal })
-    const stricter = await harness({ ...config, runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 1 } } }, { root: h.root })
+    const stricter = await harness({ ...config, runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 1 } } }, { root: h.root, confinedReads: true })
     const resumed = await stricter.agent('q2', Session.create('q2' as never, agent.session.snapshotEvents()))
     expect((await stricter.call(resumed, 'run_code', 'c')).text).toMatch(/Saved run rules no longer fit/)
   })
 
   it('reads the deployment default mode when the log has no sandbox/mode event', async () => {
     const config = ptc({ runRules: { enabled: true, allowedTools: ['bench_status', 'replay', 'run_code'], maxLimits: { replay: 2 } } })
-    const confined = await harness(config, { sandboxPolicy: { defaultMode: 'workspace-write' } })
+    const confined = await harness(config, { sandboxPolicy: { defaultMode: 'workspace-write' }, confinedReads: true })
     expect((await confined.call(await confined.agent('q3'), 'run_code', 'c')).text).not.toMatch(/refused|denies/)
-    const open = await harness(config, { sandboxPolicy: { defaultMode: 'danger-full-access' } })
-    expect((await open.call(await open.agent('q4'), 'run_code', 'c')).text).toMatch(/danger-full-access/)
+    const open = await harness(config, { sandboxPolicy: { defaultMode: 'danger-full-access' }, confinedReads: true })
+    expect((await open.call(await open.agent('q4'), 'run_code', 'c')).text).toMatch(/tamper-evident only against agents that cannot read/)
     // DSH's own resolution (override, then default) is preferred when available.
-    const resolved = await harness(config, { sandboxPolicy: { defaultMode: 'workspace-write', resolve: () => ({ mode: 'danger-full-access' }) } })
-    expect((await resolved.call(await resolved.agent('q5'), 'run_code', 'c')).text).toMatch(/danger-full-access/)
+    const resolved = await harness(config, { sandboxPolicy: { defaultMode: 'workspace-write', resolve: () => ({ mode: 'danger-full-access' }) }, confinedReads: true })
+    expect((await resolved.call(await resolved.agent('q5'), 'run_code', 'c')).text).toMatch(/tamper-evident only against agents that cannot read/)
   })
 })
 

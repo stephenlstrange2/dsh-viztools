@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dsh_viztools.managed_view import is_safe_session_id, load_gate_status, load_view_state, report_frame, safe_report_url
+import html
+import shutil
+import subprocess
+
+from dsh_viztools.managed_view import STORAGE_SHIM, is_safe_session_id, load_gate_status, load_view_state, report_frame, safe_report_url, with_storage_shim
 
 
 class ManagedViewTest(unittest.TestCase):
@@ -91,6 +95,41 @@ class ManagedViewTest(unittest.TestCase):
         self.assertEqual(load_gate_status("s2", state), [])
         self.assertEqual(load_gate_status("../s1", state), [])
         self.assertEqual(load_gate_status("missing", state), [])
+
+    def test_storage_shim_is_the_first_element_of_head_and_keeps_the_sandbox(self) -> None:
+        document = '<!DOCTYPE html><html lang="en"><head data-x="1"><meta charset="utf-8"><title>r</title></head><body>DSH session report</body></html>'
+        shimmed = with_storage_shim(document)
+        self.assertTrue(shimmed.split('<head data-x="1">', 1)[1].startswith('<script data-viztools-storage-shim="1">'))
+        self.assertIn("DSH session report", shimmed)
+        frame = report_frame(document)
+        self.assertNotIn("allow-same-origin", frame)
+        self.assertIn('sandbox="allow-scripts allow-popups allow-downloads"', frame)
+        srcdoc = html.unescape(frame.split('srcdoc="', 1)[1].rsplit('"', 1)[0])
+        self.assertEqual(srcdoc.count("data-viztools-storage-shim"), 1)
+        self.assertLess(srcdoc.index("data-viztools-storage-shim"), srcdoc.index("<meta"))
+        self.assertIn("<head>" + STORAGE_SHIM, with_storage_shim("<html><body>x</body></html>"))
+
+    @unittest.skipIf(shutil.which("node") is None, "node is required to execute the shim")
+    def test_storage_shim_replaces_throwing_storage_with_memory_storage(self) -> None:
+        script = STORAGE_SHIM.split(">", 1)[1].rsplit("</script>", 1)[0]
+        harness = """
+const insecure = () => { const e = new Error('The operation is insecure.'); e.name = 'SecurityError'; throw e; };
+const window = {};
+for (const name of ['localStorage', 'sessionStorage', 'indexedDB']) Object.defineProperty(window, name, { get: insecure, configurable: true });
+globalThis.window = window;
+""" + script + """
+window.localStorage.setItem('k', 1);
+window.sessionStorage.setItem('s', 'v');
+if (window.localStorage.getItem('k') !== '1' || window.localStorage.length !== 1 || window.localStorage.key(0) !== 'k') throw new Error('localStorage shim');
+if (window.sessionStorage.getItem('s') !== 'v' || window.sessionStorage.getItem('missing') !== null) throw new Error('sessionStorage shim');
+window.localStorage.removeItem('k'); window.localStorage.clear();
+if (window.localStorage.length !== 0) throw new Error('clear');
+if (window.indexedDB !== undefined) throw new Error('indexedDB should be stubbed when it throws');
+console.log('ok');
+"""
+        result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ok")
 
 
 if __name__ == "__main__":
