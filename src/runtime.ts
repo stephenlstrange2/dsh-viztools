@@ -105,6 +105,7 @@ export class MarimoRuntime {
   readonly notebook: string
   readonly environmentDir: string
   readonly managedReportRoot: string
+  readonly gateStateDir: string
   readonly exportPath: string
   private child: ChildProcess | undefined
   private current: RuntimeStatus | undefined
@@ -114,6 +115,7 @@ export class MarimoRuntime {
     this.cwd = resolve(config.cwd || process.cwd())
     this.notebook = config.mode === 'managed-readonly' ? MANAGED_REPORT_APP : workspacePath(this.cwd, config.notebook, 'notebook')
     this.managedReportRoot = workspacePath(this.cwd, config.managedReportRoot, 'managedReportRoot')
+    this.gateStateDir = workspacePath(this.cwd, config.gateStateDir || '.dsh/viztools/state', 'gateStateDir')
     this.environmentDir = workspacePath(this.cwd, config.environmentDir, 'environmentDir')
     this.exportPath = workspacePath(this.cwd, config.exportPath, 'exportPath')
   }
@@ -204,7 +206,7 @@ export class MarimoRuntime {
     const pythonPath = join(PACKAGE_ROOT, 'python')
     const child = spawn(this.python(), args, {
       cwd: this.cwd,
-      env: { ...process.env, ...(readonly ? { DSH_VIZTOOLS_REPORT_ROOT: this.managedReportRoot } : {}), PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${delimiter}${process.env.PYTHONPATH}` : pythonPath },
+      env: { ...process.env, ...(readonly ? { DSH_VIZTOOLS_REPORT_ROOT: this.managedReportRoot, DSH_VIZTOOLS_STATE_ROOT: this.gateStateDir } : {}), PYTHONPATH: process.env.PYTHONPATH ? `${pythonPath}${delimiter}${process.env.PYTHONPATH}` : pythonPath },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     this.child = child

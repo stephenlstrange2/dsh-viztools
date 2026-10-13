@@ -1,20 +1,20 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionEventMap } from '@deepseek-ai/dsh-session'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { mkdir, copyFile, realpath, writeFile } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
-import { completedReportKeys, reportKey, REPORT_EVENT, type ReportChange } from './report-domain.js'
+import { completedReportKeysFromRecords, reportKey, type ReportChange } from './report-domain.js'
+import { openStateStore, type JsonValue, type StateStore } from './state-store.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 import { isSafeSessionId, publishManagedState, readManagedState, REPORT_ROUTE, reportRouteUrl } from './managed-state.js'
 import { serveReport } from './report-route.js'
 import type {} from '@deepseek-ai/dsh-client-connection'
 import { containedRealpath, extractDynamicInputs, substitutePlaceholders, type DynamicInputSpec } from './dynamic-inputs.js'
 
-export { completedReportKeys, reportKey, REPORT_EVENT } from './report-domain.js'
+export { completedReportKeys, completedReportKeysFromRecords, reportKey, REPORT_EVENT } from './report-domain.js'
 export type { ReportChange } from './report-domain.js'
 
 export const name = 'dsh-viztools-report'
@@ -38,6 +38,8 @@ export interface Config {
   extraInputRoot?: string
   timeoutMs?: number
   killGraceMs?: number
+  stateDir?: string
+  gateStateDir?: string
 }
 
 export interface ResolvedConfig {
@@ -55,6 +57,8 @@ export interface ResolvedConfig {
   extraInputRoot: string
   timeoutMs: number
   killGraceMs: number
+  stateDir: string
+  gateStateDir: string
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -72,13 +76,9 @@ export const Config: z<Config, ResolvedConfig> = z.object({
   extraInputRoot: z.string().default('.'),
   timeoutMs: z.number().min(1_000).default(120_000),
   killGraceMs: z.number().min(100).default(2_000),
+  stateDir: z.string().default('.dsh/viztools/state'),
+  gateStateDir: z.string().default('.dsh/viztools/state'),
 })
-
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    'viztools-report/change': ReportChange
-  }
-}
 
 function within(root: string, candidate: string): boolean {
   const rel = relative(root, candidate)
@@ -146,8 +146,8 @@ export async function resolveTrajectoryPath(persistence: SessionPersistence, age
   return path
 }
 
-function append(agent: Agent, change: ReportChange): void {
-  agent.session.append(REPORT_EVENT, change as SessionEventMap[typeof REPORT_EVENT])
+function sidecarPath(root: string, sessionId: string, channel: 'gate' | 'report'): string {
+  return join(root, `${sessionId}.${channel}.jsonl`)
 }
 
 /** Plugin-owned report generator, independent of agent skills and marimo code-mode MCP. */
@@ -163,6 +163,19 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const inFlight = new Map<string, Promise<void>>()
   const pending = new WeakMap<Agent, Map<string, PendingTerminalTrigger>>()
   const turnScheduled = new Set<string>()
+  const stateRoot = safePath(cwd, config.stateDir, 'report stateDir')
+  const gateStateRoot = safePath(cwd, config.gateStateDir, 'report gateStateDir')
+  const stores = new WeakMap<Agent, StateStore>()
+  /** Report outcomes live on the plugin `report` channel, never as custom session-log events. */
+  const storeFor = (agent: Agent): StateStore => {
+    let store = stores.get(agent)
+    if (store === undefined) { store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'report' }); stores.set(agent, store) }
+    return store
+  }
+  const append = (agent: Agent, change: ReportChange): void => {
+    const { kind, ...data } = change
+    storeFor(agent).append(kind, data as unknown as { [key: string]: JsonValue })
+  }
   const report = (message: string, error: unknown): void => {
     const detail = error instanceof Error ? error.message : String(error)
     const logger = (ctx as unknown as { logger?: { warn?: (text: string) => void } }).logger
@@ -173,7 +186,7 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
   const generate = (agent: Agent, triggerSeq: number, trigger: string): Promise<void> => {
     const key = reportKey(String(agent.id), triggerSeq, config.templateVersion)
     try {
-      if (completedReportKeys(agent.session.snapshotEvents(), String(agent.id)).has(key)) return Promise.resolve()
+      if (completedReportKeysFromRecords(storeFor(agent).read().records, String(agent.id)).has(key)) return Promise.resolve()
     } catch (error) {
       report(`could not read report history for ${String(agent.id)}`, error)
       return Promise.resolve()
@@ -198,7 +211,12 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
         }
         await mkdir(directory, { recursive: true })
         await copyFile(template, notebook)
-        await writeFile(inputsPath, JSON.stringify({ sessionId, trigger, triggerSeq, trajectory, dynamic, extras }, null, 2), 'utf8')
+        const backend = storeFor(agent).backend
+        // Plugin state the template reads alongside the trajectory (paths only; no secrets).
+        const pluginState = backend === 'sidecar'
+          ? { backend, gate: sidecarPath(gateStateRoot, sessionId, 'gate'), report: sidecarPath(stateRoot, sessionId, 'report'), status: join(gateStateRoot, `${sessionId}.status.json`) }
+          : { backend, gate: null, report: null, status: join(gateStateRoot, `${sessionId}.status.json`) }
+        await writeFile(inputsPath, JSON.stringify({ sessionId, trigger, triggerSeq, trajectory, dynamic, extras, pluginState }, null, 2), 'utf8')
         const pythonPath = join(PACKAGE_ROOT, 'python')
         await runReportCommand(python(environmentDir), [
           '-m', 'marimo', 'export', 'html', notebook, '--force', config.includeCode ? '--include-code' : '--no-include-code', '-o', html,

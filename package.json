@@ -34,11 +34,16 @@
       "types": "./lib/client.d.ts",
       "default": "./lib/client.js"
     },
+    "./repair": {
+      "types": "./lib/repair.d.ts",
+      "default": "./lib/repair.js"
+    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "bin",
     "client-host",
     "cordis.patch.yml",
     "python",
@@ -127,5 +132,8 @@
     "check": "pnpm typecheck && pnpm test && pnpm build && pnpm test:client-bundle",
     "test:integration": "pnpm build && node scripts/integration-otx-console.mjs"
   },
-  "packageManager": "pnpm@12.3.4"
+  "packageManager": "pnpm@12.3.4",
+  "bin": {
+    "dsh-viztools-repair": "./bin/dsh-viztools-repair.mjs"
+  }
 }

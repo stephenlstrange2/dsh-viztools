@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import { Session } from '@deepseek-ai/dsh-session'
 import { resolveGateConfig } from '../src/gate.js'
 import { foldGate, GATE_EVENT_TYPE, initialGateState } from '../src/gate-domain.js'
 
@@ -12,7 +11,7 @@ function event(seq: number, data: Record<string, unknown>) {
   } as never
 }
 
-describe('plan gate durable domain', () => {
+describe('legacy in-log gate domain (migration only)', () => {
   it('starts closed', () => {
     expect(initialGateState()).toEqual({ approved: false, refusals: 0 })
   })
@@ -23,19 +22,6 @@ describe('plan gate durable domain', () => {
       event(1, { kind: 'approved', version: 1, planCallId: 'plan-1' }),
     ])
     expect(state).toEqual({ approved: true, approvedAtSeq: 1, planCallId: 'plan-1', refusals: 1 })
-  })
-
-  it('inherits approval through a fork seed', () => {
-    const parent = Session.create('parent' as never)
-    parent.append(GATE_EVENT_TYPE, { kind: 'approved', version: 1, planCallId: 'plan-parent' })
-    const child = Session.create('child' as never, parent.snapshotEvents(), {
-      version: 4,
-      id: 'child' as never,
-      createdAt: 1,
-      isSeeded: true,
-      parentSession: 'parent' as never,
-    } as never, parent.seq)
-    expect(foldGate(child.snapshotEvents())).toMatchObject({ approved: true, planCallId: 'plan-parent' })
   })
 
   it('preserves closed state when no approval exists on resume', () => {
@@ -53,9 +39,11 @@ describe('plan gate durable domain', () => {
     expect(resolveGateConfig({
       planFirst: { enabled: true, planningTools: [' read ', 'read', 'grep'], denialMessage: ' denied ' },
       runRules: { enabled: false, allowedTools: [], maxLimits: {} },
-    })).toEqual({
-      planFirst: { enabled: true, planningTools: ['read', 'grep'], denialMessage: 'denied' },
+    })).toMatchObject({
+      planFirst: { enabled: true, planningTools: ['read', 'grep'], denialMessage: 'denied', allowPtcTransport: false },
       runRules: { enabled: false, allowedTools: [], maxLimits: {} },
+      delegation: { allow: false },
+      stateDir: '.dsh/viztools/state',
     })
   })
 

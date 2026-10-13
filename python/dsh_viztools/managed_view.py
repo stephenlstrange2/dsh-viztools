@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html as _html
 import json
 import os
 import re
@@ -20,6 +21,44 @@ def is_safe_session_id(value: str) -> bool:
 
 def report_root() -> Path:
     return Path(os.environ.get("DSH_VIZTOOLS_REPORT_ROOT", ".dsh/reports"))
+
+
+def state_root() -> Path:
+    return Path(os.environ.get("DSH_VIZTOOLS_STATE_ROOT", ".dsh/viztools/state"))
+
+
+# The export runs scripts; without allow-same-origin the frame gets an opaque origin, so the
+# report can render but cannot reach the marimo or DSH origins. A fixed CSS height avoids
+# marimo's mo.iframe auto-resize (onload="__resizeIframe(this)"), which collapsed the frame
+# to ~85 px inside the sidebar.
+REPORT_FRAME_SANDBOX = "allow-scripts allow-popups allow-downloads"
+REPORT_FRAME_HEIGHT = "80vh"
+
+
+def report_frame(document: str) -> str:
+    """HTML for an iframe that embeds the export at a fixed viewport-relative height."""
+    return (
+        f'<iframe data-viztools-report="1" title="Run report" sandbox="{REPORT_FRAME_SANDBOX}" '
+        f'referrerpolicy="no-referrer" style="width:100%;height:{REPORT_FRAME_HEIGHT};min-height:480px;border:0;display:block" '
+        f'srcdoc="{_html.escape(document, quote=True)}"></iframe>'
+    )
+
+
+def load_gate_status(session: str, root: Path | None = None) -> list[str]:
+    """User-facing gate notices for a session (plan mode unavailable, damaged state, ...)."""
+    if not session or not is_safe_session_id(session):
+        return []
+    base = (root if root is not None else state_root()).resolve()
+    target = (base / f"{session}.status.json").resolve()
+    if target.parent != base:
+        return []
+    try:
+        status = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(status, dict) or status.get("sessionId") != session:
+        return []
+    return [str(status[key]) for key in ("planNotice", "stateNotice", "countsUntrusted", "rulesInvalid") if isinstance(status.get(key), str) and status.get(key)]
 
 
 def _pending(session: str) -> dict[str, Any]:

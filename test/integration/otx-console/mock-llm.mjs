@@ -25,6 +25,18 @@ export const SCRIPT = [
   'Run run-it-1 finalized. INTEGRATION-DONE',
 ]
 
+function text(message) {
+  return typeof message.content === 'string' ? message.content : Array.isArray(message.content) ? message.content.map((part) => part.text ?? '').join('') : ''
+}
+
+/** After a restart the harness sends RESUME-CHECK: try one more limited replay, then finish. */
+function resumeEntry(messages) {
+  const index = messages.findLastIndex((message) => message.role === 'user' && text(message).includes('RESUME-CHECK'))
+  if (index < 0) return undefined
+  const calls = messages.slice(index).filter((message) => message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0).length
+  return calls === 0 ? [{ name: 'mcp__otx__replay_tx_only', args: { run_id: 'run-it-1' } }] : 'Resumed. RESUME-DONE'
+}
+
 function stepIndex(messages) {
   return messages.filter((message) => message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0).length
 }
@@ -78,10 +90,10 @@ export function startMockLlm(port = 0) {
         return
       }
       const step = stepIndex(messages)
-      const entry = SCRIPT[Math.min(step, SCRIPT.length - 1)]
+      const entry = resumeEntry(messages) ?? SCRIPT[Math.min(step, SCRIPT.length - 1)]
       if (process.env.MOCK_LLM_LOG) appendFileSync(process.env.MOCK_LLM_LOG, `${JSON.stringify({ kind: 'step', step, tools: tools.sort(), lastTool: messages.filter((m) => m.role === 'tool').map((m) => String(m.content).slice(0, 300)).at(-1) })}\n`)
       if (typeof entry === 'string') sse(res, textChunks(model, entry))
-      else sse(res, toolChunks(model, step, entry))
+      else sse(res, toolChunks(model, resumeEntry(messages) === undefined ? step : `r${step}`, entry))
     })
   })
   return new Promise((resolve) => server.listen(port, '127.0.0.1', () => resolve(server)))

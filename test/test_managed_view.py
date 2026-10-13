@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dsh_viztools.managed_view import is_safe_session_id, load_view_state, safe_report_url
+from dsh_viztools.managed_view import is_safe_session_id, load_gate_status, load_view_state, report_frame, safe_report_url
 
 
 class ManagedViewTest(unittest.TestCase):
@@ -65,6 +65,30 @@ class ManagedViewTest(unittest.TestCase):
         self.assertEqual(safe_report_url("http://127.0.0.1:3185/api/viztools/report?session=s1"), "http://127.0.0.1:3185/api/viztools/report?session=s1")
         for value in ["javascript:alert(1)", "/api/viztools/report?session=s1", "http://x/api/other", "file:///etc/passwd"]:
             self.assertEqual(safe_report_url(value), "", value)
+
+    def test_report_frame_has_a_fixed_height_and_no_marimo_auto_resize(self) -> None:
+        frame = report_frame('<html><body onload="x()">"quoted" & <b>bold</b></body></html>')
+        self.assertIn("height:80vh", frame)
+        self.assertNotIn("__resizeIframe", frame)
+        self.assertNotIn("onload=", frame.split("srcdoc=")[0])
+        self.assertIn('sandbox="allow-scripts allow-popups allow-downloads"', frame)
+        self.assertNotIn("allow-same-origin", frame)
+        self.assertIn("&quot;quoted&quot; &amp; &lt;b&gt;", frame)
+
+    def test_viewer_app_does_not_use_mo_iframe(self) -> None:
+        source = (Path(__file__).resolve().parents[1] / "python" / "dsh_viztools" / "managed_report_app.py").read_text(encoding="utf-8")
+        self.assertNotIn("mo.iframe(", source)
+        self.assertIn("report_frame(", source)
+
+    def test_gate_status_notices_are_shown_and_contained(self) -> None:
+        state = Path(self._tmp.name) / "state"
+        state.mkdir()
+        (state / "s1.status.json").write_text(json.dumps({"sessionId": "s1", "planNotice": "Plan mode is unavailable in this deployment"}), encoding="utf-8")
+        (state / "s2.status.json").write_text(json.dumps({"sessionId": "other", "planNotice": "x"}), encoding="utf-8")
+        self.assertEqual(load_gate_status("s1", state), ["Plan mode is unavailable in this deployment"])
+        self.assertEqual(load_gate_status("s2", state), [])
+        self.assertEqual(load_gate_status("../s1", state), [])
+        self.assertEqual(load_gate_status("missing", state), [])
 
 
 if __name__ == "__main__":

@@ -10,17 +10,18 @@ import { approvedGateChange, otxFinalizeCall, otxPtcStart, otxToolResultContentB
  */
 describe('OTX hardening release blockers', () => {
 
-  it('PTC plan transport can run while non-planning tools stay closed', async () => {
+  it('PTC transport is governed: refused before approval unless the deployment opts in under a confined policy', async () => {
     const { decideTool } = await import('../src/gate-policy.js')
     const planning = new Set(['run_code', 'exit_plan_mode', 'bench_status'])
     const allowed = new Set(['run_code', 'exit_plan_mode', 'bench_status', 'emit_otx'])
-    const base = { knownAgent: true, planApproved: false, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {} }
-    expect(decideTool({ ...base, tool: 'run_code' })).toBeUndefined()
+    const base = { knownAgent: true, planApproved: false, planningTools: planning, controlTools: new Set(['exit_plan_mode']), deploymentAllowed: allowed, deploymentLimits: {}, counts: {} }
+    // Listing run_code as a planning tool is not enough: its program has Node APIs.
+    expect(decideTool({ ...base, tool: 'run_code' })?.code).toBe('PTC_TRANSPORT_DENIED')
+    expect(decideTool({ ...base, tool: 'run_code', ptcBeforeApproval: true })).toBeUndefined()
     expect(decideTool({ ...base, tool: 'exit_plan_mode' })).toBeUndefined()
     expect(decideTool({ ...base, tool: 'emit_otx' })?.code).toBe('PLAN_NOT_APPROVED')
+    expect(decideTool({ ...base, planApproved: true, deploymentAllowed: new Set(['emit_otx']), tool: 'run_code' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
   })
-
-
 
   it('keeps realistic modern DSH and PTC fixture shapes', () => {
     expect(otxToolResultContentBlock.data.message.content[0].isError).toBe(false)

@@ -7,8 +7,9 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import { ToolRuntime, defineTool } from '@deepseek-ai/dsh-tools'
 import { describe, expect, it } from 'vitest'
 import { decideTool } from '../src/gate-policy.js'
-import { foldGate, GATE_EVENT_TYPE } from '../src/gate-domain.js'
-import { deploymentFingerprint, foldRunRules, RUN_RULES_EVENT, type RunRules } from '../src/run-rules.js'
+import { foldGateRecords } from '../src/gate-state.js'
+import { createSidecarStore } from '../src/state-store.js'
+import { deploymentFingerprint, type RunRules } from '../src/run-rules.js'
 import { matchTerminalResult } from '../src/report-trigger.js'
 import { publishManagedState } from '../src/managed-state.js'
 import { checkLockedProfile } from '../src/profile-check.js'
@@ -26,14 +27,17 @@ describe('OTX acceptance chain', () => {
     const planning = new Set(['run_code', 'exit_plan_mode', 'bench_status'])
     const deploymentAllowed = new Set(['run_code', 'exit_plan_mode', 'bench_status', 'mcp__otx__replay_tx_only', 'mcp__otx__finalize_run'])
     expect(decideTool({ knownAgent: true, planApproved: false, planningTools: planning, deploymentAllowed, deploymentLimits: {}, counts: {}, tool: 'mcp__otx__finalize_run' })?.code).toBe('PLAN_NOT_APPROVED')
-    session.append(GATE_EVENT_TYPE, { kind: 'approved', version: 1, planCallId: 'plan' })
-    expect(foldGate(session.snapshotEvents()).approved).toBe(true)
+    const stateRoot = await mkdtemp(join(tmpdir(), 'otx-acceptance-state-'))
+    const store = createSidecarStore(stateRoot, session as never, 'gate')
+    store.append('plan-approved', { planCallId: 'plan' })
+    expect(foldGateRecords(store.read().records).approved).toBe(true)
 
     const rules: RunRules = { version: 3, allow: ['mcp__otx__replay_tx_only', 'mcp__otx__finalize_run'], deny: [], limits: { mcp__otx__replay_tx_only: 1 }, notes: [], deploymentFingerprint: deploymentFingerprint([...deploymentAllowed], { mcp__otx__replay_tx_only: 1 }) }
-    session.append(RUN_RULES_EVENT, { kind: 'approved', version: 3, callId: 'rules', rules })
-    session.append(RUN_RULES_EVENT, { kind: 'started-call', version: 3, callId: 'replay-1', tool: 'mcp__otx__replay_tx_only' })
-    const replayed = foldRunRules(session.snapshotEvents())
+    store.append('rules-approved', { callId: 'rules', rules: rules as never })
+    store.append('started', { callId: 'replay-1', tool: 'mcp__otx__replay_tx_only' })
+    const replayed = foldGateRecords(store.read().records)
     expect(replayed.rules).toBeDefined()
+    expect(session.snapshotEvents().some((event) => String(event.type).startsWith('viztools'))).toBe(false)
     const activeRules = replayed.rules as RunRules
     expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed, deploymentLimits: { mcp__otx__replay_tx_only: 1 }, rules: activeRules, counts: replayed.counts, tool: 'mcp__otx__replay_tx_only' })?.code).toBe('RUN_RULE_LIMIT')
 
@@ -52,7 +56,7 @@ describe('OTX acceptance chain', () => {
     expect(JSON.parse(await readFile(statePath, 'utf8')).status).toBe('available')
 
     expect(checkLockedProfile({
-      mode: 'managed-readonly', cwd: '', notebook: '.dsh/reports/current/report.py', managedReportRoot: '.dsh/reports', environmentDir: '.dsh/marimo',
+      mode: 'managed-readonly', cwd: '', notebook: '.dsh/reports/current/report.py', managedReportRoot: '.dsh/reports', gateStateDir: '.dsh/viztools/state', environmentDir: '.dsh/marimo',
       uv: { command: 'uv', minVersion: '0.11.0', offline: true, indexUrl: '', findLinks: '', cacheDir: '.dsh/cache', pythonInstallDir: '.dsh/python', requirements: 'python/requirements.lock', requireHashes: true }, uvCommand: 'uv',
       pythonVersion: '3.12', marimoVersion: '0.25.1', mcpCodeMode: false, autoOpen: true, exportPath: '.dsh/report.html', startupTimeoutMs: 120000,
     })).toEqual({ ok: true, errors: [] })

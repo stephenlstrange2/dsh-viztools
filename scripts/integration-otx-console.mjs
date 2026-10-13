@@ -12,7 +12,7 @@
 // playwright-core plus a Chromium binary (PLAYWRIGHT_CORE_DIR / CHROMIUM_PATH).
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { appendFile, cp, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir, homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -161,31 +161,45 @@ try {
   check('scripted run completes in the real web console', done)
   check('no gate visibility or planMode errors surfaced', !pageErrors.some((text) => /not visible|requires the planMode/.test(text)) && !/not visible to agent|requires the planMode service/.test(dsh.output()), pageErrors.join(' | '))
 
-  // Durable session log (DSH 0.2 writes zstd-compressed v4 JSONL).
+  // Durable session log (DSH 0.2 writes zstd-compressed v4 JSONL) and the plugin sidecar.
   const sessionLogs = await walk(join(home, 'sessions'), (path) => /session\.v\d+\.jsonl(\.zstd)?$/.test(path))
   const readSession = (path) => readJsonl(path.endsWith('.zstd') ? execFileSync('zstd', ['-dc', path]).toString('utf8') : execFileSync('cat', [path]).toString('utf8'))
+  const stateDir = join(workspace, '.dsh', 'viztools', 'state')
   let typed = []
   let sessionId = ''
   let sessionLog = ''
   for (const path of sessionLogs) {
-    const parsed = readSession(path)
-    if (parsed.some((entry) => entry.type === 'viztools-gate/change')) { typed = parsed; sessionLog = path; sessionId = path.split('/').at(-2); break }
+    const id = path.split('/').at(-2)
+    if (existsSync(join(stateDir, `${id}.gate.jsonl`))) { typed = readSession(path); sessionLog = path; sessionId = id; break }
   }
-  check('session log found', sessionLog !== '', sessionLogs.join(', '))
-  const gate = typed.filter((entry) => entry.type === 'viztools-gate/change').map((entry) => entry.data)
-  const rules = typed.filter((entry) => entry.type === 'viztools-run-rules/change').map((entry) => entry.data)
-  const reports = typed.filter((entry) => entry.type === 'viztools-report/change').map((entry) => entry.data)
-  check('pre-approval refusal persisted live', gate.some((change) => change.kind === 'refused' && change.tool === 'mcp__otx__replay_tx_only'), JSON.stringify(gate))
-  check('plan approval persisted', gate.some((change) => change.kind === 'approved'))
-  const approved = rules.find((change) => change.kind === 'approved')
-  check('run rules approved (v3, no allowlist = deployment ceiling)', approved?.version === 3 && approved.rules.allow === undefined, JSON.stringify(approved?.rules))
-  const replayStarts = rules.filter((change) => change.kind === 'started-call' && change.tool === 'mcp__otx__replay_tx_only').length
-  check('parallel limited calls: exactly one replay started', replayStarts === 1, `started=${replayStarts}`)
-  check('parallel limited calls: the other was refused at the limit', rules.filter((change) => change.kind === 'limit-reached' && change.tool === 'mcp__otx__replay_tx_only').length === 1)
-  check('session-rule denial persisted', rules.some((change) => change.kind === 'refused-call' && change.tool === 'mcp__otx__emit_otx'))
-  check('terminal call counted as started', rules.some((change) => change.kind === 'started-call' && change.tool === 'mcp__otx__finalize_run'))
-  const ids = [...gate.filter((c) => c.kind === 'refused'), ...rules.filter((c) => c.kind !== 'approved')].map((change) => `${change.kind}:${change.callId}`)
-  check('refusal and start events are not duplicated', new Set(ids).size === ids.length)
+  check('session log and gate sidecar found', sessionLog !== '', sessionLogs.join(', '))
+  check('no custom (non-ignorable) viztools event types in session.jsonl', !typed.some((entry) => String(entry.type).startsWith('viztools') && entry.ignorable !== true), typed.filter((entry) => String(entry.type).startsWith('viztools')).map((entry) => entry.type).join(','))
+  const readSidecar = async (channel) => readJsonl(await readFile(join(stateDir, `${sessionId}.${channel}.jsonl`), 'utf8').catch(() => ''))
+  const gateRecords = await readSidecar('gate')
+  const refusals = gateRecords.filter((record) => record.kind === 'refused').map((record) => record.data)
+  const starts = (records, tool) => {
+    const started = new Set()
+    for (const record of records) {
+      if (record.data.tool !== tool) continue
+      if (record.kind === 'started') started.add(record.data.callId)
+      if (record.kind === 'not-started') started.delete(record.data.callId)
+    }
+    return started.size
+  }
+  check('pre-approval refusal persisted live', refusals.some((refusal) => refusal.code === 'PLAN_NOT_APPROVED' && refusal.beforeApproval === true && refusal.tool === 'mcp__otx__replay_tx_only'), JSON.stringify(refusals))
+  check('plan approval persisted', gateRecords.some((record) => record.kind === 'plan-approved'))
+  const approved = gateRecords.find((record) => record.kind === 'rules-approved')
+  check('run rules approved (no allowlist = deployment ceiling)', approved !== undefined && approved.data.rules.allow === undefined, JSON.stringify(approved?.data.rules))
+  const liveReplayStarts = starts(gateRecords, 'mcp__otx__replay_tx_only')
+  check('parallel limited calls: exactly one replay started', liveReplayStarts === 1, `started=${liveReplayStarts}`)
+  check('parallel limited calls: the other was refused at the limit', refusals.filter((refusal) => refusal.code === 'RUN_RULE_LIMIT' && refusal.tool === 'mcp__otx__replay_tx_only').length === 1)
+  check('session-rule denial persisted', refusals.some((refusal) => refusal.code === 'RUN_RULE_DENIED' && refusal.tool === 'mcp__otx__emit_otx'))
+  check('terminal call recorded as started', starts(gateRecords, 'mcp__otx__finalize_run') === 1)
+  const ids = gateRecords.filter((record) => record.kind === 'refused' || record.kind === 'started').map((record) => `${record.kind}:${record.data.callId}`)
+  check('refusal and start records are not duplicated', new Set(ids).size === ids.length)
+  const chain = gateRecords.every((record, index) => record.i === index)
+  check('gate sidecar is a contiguous hash chain', chain && gateRecords[0]?.prev === '')
+  check('gate sidecar is owner-only (0600)', ((await stat(join(stateDir, `${sessionId}.gate.jsonl`))).mode & 0o777) === 0o600)
 
   const calls = existsSync(env.OTX_FIXTURE_CALL_LOG) ? readJsonl(await readFile(env.OTX_FIXTURE_CALL_LOG, 'utf8')) : []
   check('bench saw exactly one replay', calls.filter((call) => call.name === 'replay_tx_only').length === 1, JSON.stringify(calls.map((call) => call.name)))
@@ -200,8 +214,7 @@ try {
     await new Promise((res) => setTimeout(res, 1500))
   }
   check('report state published as available', state?.status === 'available', JSON.stringify(state))
-  const finalEvents = sessionLog === '' ? [] : readSession(sessionLog)
-  check('report available event persisted', finalEvents.some((entry) => entry.type === 'viztools-report/change' && entry.data.kind === 'available') || reports.some((change) => change.kind === 'available'))
+  check('report available record persisted on the report channel', (await readSidecar('report')).some((record) => record.kind === 'available'))
   check('state carries the authenticated route', state?.url === `/api/viztools/report?session=${encodeURIComponent(sessionId)}`)
 
   const served = await page.request.get(`${origin}${state?.url ?? '/api/viztools/report'}`)
@@ -240,39 +253,78 @@ try {
     await viewer.close()
   }
 
-  // Resume: restart DSH on the same home and reopen the session.
+  // Restart. First simulate a session written by an older dsh-viztools: inject a legacy,
+  // non-ignorable viztools-* event (rc.2 refuses such logs) and repair it with the CLI.
   await browser.close(); browser = undefined
   await stopDsh(dsh)
+  const liveRecords = await readSidecar('gate')
+  if (process.env.VIZTOOLS_IT_SKIP_LEGACY !== '1') {
+    const raw = execFileSync('zstd', ['-dc', sessionLog]).toString('utf8')
+    const lastSeq = Math.max(...readJsonl(raw).filter((entry) => typeof entry.seq === 'number').map((entry) => entry.seq))
+    const legacy = { type: 'viztools-gate/change', seq: lastSeq + 1, time: Date.now(), data: { kind: 'refused', version: 1, callId: 'legacy-1', tool: 'mcp__otx__emit_otx', reason: 'Plan not approved yet.' } }
+    const injected = `${raw.endsWith('\n') ? raw : `${raw}\n`}${JSON.stringify(legacy)}\n`
+    // Append one more zstd frame, exactly as an older plugin's DSH batch write would have.
+    await appendFile(sessionLog, execFileSync('zstd', ['-q', '-c', '-'], { input: `${JSON.stringify(legacy)}\n` }))
+    const repairCli = join(repo, 'bin', 'dsh-viztools-repair.mjs')
+    const dry = execFileSync(process.execPath, [repairCli, '--dsh-home', home, '--workspace', workspace, '--dry-run']).toString('utf8')
+    check('repair dry-run reports the legacy session and writes nothing', /would-convert/.test(dry) && execFileSync('zstd', ['-dc', sessionLog]).toString('utf8') === injected, dry.trim().split('\n')[0])
+    const repaired = execFileSync(process.execPath, [repairCli, '--dsh-home', home, '--workspace', workspace]).toString('utf8')
+    check('repair converts the legacy event and keeps a backup', /converted/.test(repaired) && (await readdir(dirname(sessionLog))).some((name) => name.includes('viztools-backup')), repaired.trim().split('\n')[0])
+
+  }
+
   const port2 = await freePort()
   dsh = startDsh(env, workspace, port2, join(logs, 'dsh-2.log'))
   const url2 = await dsh.ready
   browser = await chromium.launch({ executablePath: chromiumPath, args: ['--disable-crash-reporter', '--no-crashpad', '--disable-gpu'], env: { ...process.env, HOME: join(root, 'chrome-home') } })
-  const page2 = await browser.newPage({ viewport: { width: 1500, height: 950 } })
+  // The OTX console VM resolution: the report must fill the right sidebar, not an 85 px strip.
+  const page2 = await browser.newPage({ viewport: { width: 1910, height: 916 } })
   await page2.goto(url2, { waitUntil: 'networkidle' })
   await page2.waitForTimeout(2000)
   await dismissDialogs(page2)
-  await chooseWorkspace(page2, workspace).catch(() => undefined)
-  await page2.waitForTimeout(1500)
-  const sessionLink = page2.getByText('OTX integration run').first()
-  if (await sessionLink.count()) await sessionLink.click()
-  await page2.waitForTimeout(3000)
-  const history = await page2.evaluate(() => document.body.innerText)
-  check('persisted session history loads after a DSH restart', !/Failed to load history|unknown to this harness/.test(history), (/contains event type "[^"]+"/.exec(history) ?? [''])[0])
-  // A follow-up prompt forces the persisted agent to be resumed (agent/created on resume).
+  // Open the exact persisted session from the sidebar list, as a returning operator would.
+  let history = ''
+  for (let i = 0; i < 30 && !/INTEGRATION-DONE|Failed to load history/.test(history); i++) {
+    const link = page2.getByText('OTX integration run', { exact: true }).first()
+    if (await link.count()) await link.click().catch(() => undefined)
+    await page2.waitForTimeout(1000)
+    history = await page2.evaluate(() => document.body.innerText)
+  }
+  check('reopened the original session (not a new one)', /INTEGRATION-DONE/.test(history) || /Failed to load history/.test(history), history.slice(0, 160).replace(/\s+/g, ' '))
+  check('persisted session history loads after a DSH restart', /INTEGRATION-DONE/.test(history) && !/Failed to load history|unknown to this harness/.test(history), (/contains event type "[^"]+"/.exec(history) ?? [history.slice(0, 120).replace(/\s+/g, ' ')])[0])
+  // A follow-up prompt forces the persisted agent to be resumed; the script then tries one
+  // more limited replay, which a correctly replayed count (1 of 1) must refuse.
   const box2 = page2.locator('[contenteditable="true"], textarea').first()
   await box2.click()
-  await page2.keyboard.type('Summarize the run.')
+  await page2.keyboard.type('RESUME-CHECK: summarize the run.')
   await page2.keyboard.press('Enter')
   let resumedTurn = false
   for (let i = 0; i < 40 && !resumedTurn; i++) {
     await page2.waitForTimeout(2000)
-    resumedTurn = ((await page2.evaluate(() => document.body.innerText)).match(/INTEGRATION-DONE/g) ?? []).length >= 2
+    resumedTurn = /RESUME-DONE/.test(await page2.evaluate(() => document.body.innerText))
   }
-  await page2.screenshot({ path: join(logs, 'resume.png') })
   check('resumed session accepts a new turn', resumedTurn)
   await new Promise((res) => setTimeout(res, 1500))
-  const resumedRules = readSession(sessionLog).filter((entry) => entry.type === 'viztools-run-rules/change').map((entry) => entry.data)
-  check('resume replays counts without new starts', resumedRules.filter((change) => change.kind === 'started-call' && change.tool === 'mcp__otx__replay_tx_only').length === 1)
+  const resumedRecords = await readSidecar('gate')
+  check('resumed counts equal the live counts', starts(resumedRecords, 'mcp__otx__replay_tx_only') === liveReplayStarts && starts(resumedRecords, 'mcp__otx__finalize_run') === starts(liveRecords, 'mcp__otx__finalize_run'), `live=${liveReplayStarts} resumed=${starts(resumedRecords, 'mcp__otx__replay_tx_only')}`)
+  check('resumed gate refuses the replay at the limit', resumedRecords.slice(liveRecords.length).some((record) => record.kind === 'refused' && record.data.code === 'RUN_RULE_LIMIT' && record.data.tool === 'mcp__otx__replay_tx_only'), JSON.stringify(resumedRecords.slice(liveRecords.length).map((record) => [record.kind, record.data.code])))
+  const originalHasResume = execFileSync('zstd', ['-dc', sessionLog]).toString('utf8').includes('RESUME-CHECK')
+  check('the resumed turn ran in the original session', originalHasResume)
+  const benchAfter = readJsonl(await readFile(env.OTX_FIXTURE_CALL_LOG, 'utf8'))
+  check('bench still saw exactly one replay after resume', benchAfter.filter((call) => call.name === 'replay_tx_only').length === 1)
+
+  // Report frame height inside the right sidebar at 1910x916.
+  let frameHeight = 0
+  for (let i = 0; i < 30 && frameHeight === 0; i++) {
+    for (const frame of page2.frames()) {
+      const handle = await frame.$('iframe[data-viztools-report]').catch(() => null)
+      const box = handle === null ? null : await handle.boundingBox().catch(() => null)
+      if (box !== null && box.height > frameHeight) frameHeight = box.height
+    }
+    if (frameHeight === 0) await page2.waitForTimeout(1000)
+  }
+  await page2.screenshot({ path: join(logs, 'resume.png') })
+  check('report iframe in the right sidebar is at least 60% of the viewport height (1910x916)', frameHeight >= 0.6 * 916, `height=${Math.round(frameHeight)}px`)
   const resumed = JSON.parse(await readFile(statePath, 'utf8'))
   check('resume keeps the available report state', resumed.status === 'available', JSON.stringify(resumed))
   const servedAgain = await page2.request.get(`${new URL(url2).origin}${state?.url ?? ''}`)

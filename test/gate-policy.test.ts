@@ -25,9 +25,20 @@ describe('monotonic gate policy', () => {
     expect(() => expandPatterns(['r*'], ['replay_tx_only', 'read', 'run_code'], new Set(['replay_tx_only']))).toThrow(/deployment-denied/)
   })
 
-  it('marks delegation tools outside an OTX deployment as denied', () => {
-    expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {}, tool: 'subagent' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
-    expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: {}, counts: {}, tool: 'subagent_fork' })?.code).toBe('DEPLOYMENT_TOOL_DENIED')
+  it('refuses delegation unless the deployment opts in, even when the tool is allowed', () => {
+    const withDelegation = new Set([...allowed, 'subagent', 'subagent_fork', 'workflow'])
+    for (const tool of ['subagent', 'subagent_fork', 'workflow']) {
+      expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: withDelegation, deploymentLimits: {}, counts: {}, tool })?.code).toBe('DELEGATION_DENIED')
+      expect(decideTool({ knownAgent: true, planFirst: false, planApproved: false, planningTools: planning, deploymentAllowed: withDelegation, deploymentLimits: {}, counts: {}, tool })?.code).toBe('DELEGATION_DENIED')
+    }
+    expect(decideTool({ knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: withDelegation, deploymentLimits: {}, counts: {}, tool: 'subagent', delegationAllowed: true })).toBeUndefined()
+  })
+
+  it('refuses every governed tool when saved rules are invalid and limited tools when counts are untrusted', () => {
+    const base = { knownAgent: true, planApproved: true, planningTools: planning, deploymentAllowed: allowed, deploymentLimits: { replay_tx_only: 3 }, counts: {} }
+    expect(decideTool({ ...base, tool: 'diff', rulesInvalid: 'Saved run rules no longer fit this deployment' })?.code).toBe('RUN_RULES_INVALID')
+    expect(decideTool({ ...base, tool: 'replay_tx_only', countsUntrusted: 'state truncated' })?.code).toBe('COUNTS_UNTRUSTED')
+    expect(decideTool({ ...base, tool: 'diff', countsUntrusted: 'state truncated' })).toBeUndefined()
   })
 
   it('plan-first only: approval opens every tool with no deployment allowlist', () => {

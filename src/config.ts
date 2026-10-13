@@ -23,6 +23,8 @@ export interface Config {
   notebook?: string
   /** Trusted plugin-generated report root required by managed-readonly mode. */
   managedReportRoot?: string
+  /** Gate state directory (status files the locked viewer shows). Must match the gate's `stateDir`. */
+  gateStateDir?: string
   /** Directory for the uv-managed Python environment, relative to cwd unless absolute. */
   environmentDir?: string
   /** uv provisioning configuration. */
@@ -48,6 +50,7 @@ export interface ResolvedConfig {
   cwd: string
   notebook: string
   managedReportRoot: string
+  gateStateDir: string
   environmentDir: string
   uv: {
     command: string
@@ -74,6 +77,7 @@ export const Config = z.object({
   cwd: z.string().default(''),
   notebook: z.string().default('.dsh/notebooks/explanation.py'),
   managedReportRoot: z.string().default('.dsh/reports'),
+  gateStateDir: z.string().default('.dsh/viztools/state'),
   environmentDir: z.string().default('.dsh/marimo'),
   uv: z.object({
     command: z.string().default('uv'),

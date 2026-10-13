@@ -150,7 +150,11 @@ The enforcement entry is separate from the marimo runtime. **Mount it inside the
                     denialMessage: Plan not approved yet.
 ```
 
-New sessions, and resumed sessions without an approved plan, enter plan mode. Until a positive `exit_plan_mode` review, only the planning tools and the gate's control tools can execute: `exit_plan_mode`, `propose_run_rules` when run rules are enabled, and the PTC transport `run_code`. Each refusal is written durably at the moment the guard decides it, once per call. Approval survives resume, and forks inherit the gate state at their fork point.
+New sessions, and resumed sessions without an approved plan, enter plan mode. Until a positive `exit_plan_mode` review, only the planning tools and the gate's control tools can execute: `exit_plan_mode`, and `propose_run_rules` when run rules are enabled. Each refusal is written durably at the moment the guard decides it, once per call. Approval survives resume, and forks inherit the gate state at their fork point. If plan mode is not available, the refusal text and the locked viewer both say so, so the session is not silently stuck.
+
+**`run_code` is governed like any other tool.** Its program gets Node APIs (fs, net, child_process) that only the DSH sandbox limits, so allowing it before approval would bypass the gate. It is refused before approval unless the deployment sets `planFirst.allowPtcTransport: true` **and** the session's file policy is confined (`read-only` or `workspace-write`, never `danger-full-access` or unknown). After approval, it is subject to `runRules.allowedTools` and the session rules. PTC presets that plan through `run_code` must opt in.
+
+**Delegation** (`subagent`, `subagent_fork`, `workflow`) is refused whenever the gate is active, because a child agent would escape the parent's approval and limits. Set `delegation.allow: true` to opt in. Children created by an allowed delegation call then share the parent's gate: the same approval, rules, and counts. A child that cannot be attached to its parent gets no fresh budget: its limited tools are refused.
 
 Policy is decided per call, not at agent creation. MCP tools that register after the agent exists are handled correctly, and native (non-PTC) presets need no `run_code`. The gate enforces both native calls and nested PTC dispatches. Plan mode alone is not authorization: `/plan off`, a dismissed review, or **Keep planning** does not open the gate.
 
@@ -175,11 +179,50 @@ runRules:
 
 The agent calls `propose_run_rules` with `deny`, `limits`, `notes`, and an optional `allow`. Omitting `allow` keeps the deployment set. An empty `allow` denies every governed tool, and so does an empty intersection of successive approvals. The plugin validates the proposal against the calling agent's tool view, rejects anything outside `allowedTools` or above `maxLimits`, and then asks the user to approve the complete value. Successive approvals only narrow: allowlists intersect, denylists union, and limits take the minimum.
 
-Limits count calls that actually started. The guard reserves a slot synchronously, so parallel calls cannot overshoot, and a durable `started-call` event is written when dispatch begins. Failed calls that started still count. Refused calls do not. Live and resumed counts come from the same fold. Free-text notes enter the system prompt labelled **advisory; not mechanically enforced**. Delegation (`subagent`, `subagent_fork`, `workflow`) is refused while approved rules govern the session.
+Limits count calls that actually started. The guard reserves a slot synchronously, so parallel calls cannot overshoot, and a durable `started` record is written when dispatch begins. Failed calls that started still count. Refused calls, calls aborted before the body ran, and calls to tools that do not exist do not count. Live and resumed counts come from the same fold. Free-text notes enter the system prompt labelled **advisory; not mechanically enforced**.
+
+If saved rules no longer fit the deployment (allowed tools or caps changed), the gate does not fall back to the deployment allowlist. It fails closed: every governed tool is refused with a clear message, a `rules-invalidated` record is written, and a newly approved rule set replaces the stale one.
 
 `explain_plan()` exposes a `rules` table showing enforced rules (including the allowlist), observed calls, refused calls, and advisory notes.
 
-> **Known blocker (DSH 0.2.0-rc.2):** DSH refuses to reopen, after a restart, a session log that contains these durable plugin events. rc.2 gives plugins no way to mark events `ignorable`. Live sessions work. See [OTX_HARDENING.md](OTX_HARDENING.md).
+### Where gate and report state is stored
+
+DSH 0.2.0-rc.2 refuses to reopen a session log that contains an unknown event type unless it is marked `ignorable`, and rc.2 gives plugins no way to set that marker. So dsh-viztools **writes no custom event types into `session.jsonl`**. State goes to:
+
+- **DSH 0.2.0-rc.2:** a plugin-owned sidecar per session under the workspace, `<stateDir>/<session>.gate.jsonl` and `<session>.report.jsonl` (default `stateDir: .dsh/viztools/state`). Each sidecar is append-only, fsync'd after every record, mode 0600, and an index plus SHA-256 chain over the records detects truncation or edits. Forks inherit the parent's records up to the fork point.
+- **DSH with `appendPluginRecord` (0.2.1+):** ignorable `plugin:dsh-viztools/<channel>` records in the session log, selected automatically at runtime.
+
+The gate fails closed when it cannot trust this state. If the sidecar is missing although the session log shows gated activity, or it is truncated or edited, plan approval is reset and saved rules are refused until they are re-approved. Tools with call limits stay refused for the rest of that session, because their counts cannot be trusted. The same applies when a completed call to a limited tool in the session log has no recorded decision. The sidecar is located through the gate's `cwd`/`stateDir`, so start the console from the same workspace.
+
+#### Repairing sessions written by older versions
+
+Sessions written by dsh-viztools up to `ca3b3ca` contain `viztools-*` events that rc.2 refuses to load ("Failed to load history … unknown to this harness and not marked ignorable"). Stop every DSH process that uses the DSH home, then run:
+
+```bash
+dsh-viztools-repair --dsh-home ~/.dsh --workspace /path/to/console/cwd --dry-run   # report only
+dsh-viztools-repair --dsh-home ~/.dsh --workspace /path/to/console/cwd             # repair
+```
+
+The repair backs up each changed log as `<log>.viztools-backup-<time>`, exports the legacy state into the sidecar (unless one already exists), and marks the legacy events `ignorable: true` in place. It converts rather than deletes: other events refer to sequence numbers, so deleting events would renumber the log and corrupt it. Zstd logs keep DSH's frame layout, with the header alone in the first frame. Use `--session <id>` to limit the repair to specific sessions.
+
+### Migration notes (from `ca3b3ca`)
+
+No public config key was renamed or removed. New keys, all optional:
+
+| Entry | Key | Default | Purpose |
+|---|---|---|---|
+| gate | `planFirst.allowPtcTransport` | `false` | Allow `run_code` before approval (only under a confined file policy) |
+| gate | `delegation.allow` | `false` | Allow `subagent`/`subagent_fork`/`workflow`; children share the parent's gate |
+| gate | `cwd`, `stateDir` | process cwd, `.dsh/viztools/state` | Where the gate sidecar and status files live |
+| report | `stateDir`, `gateStateDir` | `.dsh/viztools/state` | Report sidecar; gate sidecar path passed to templates |
+| runtime | `gateStateDir` | `.dsh/viztools/state` | Gate status files shown by the locked viewer |
+
+Behavior changes that can affect existing profiles:
+
+- `run_code` is refused before approval by default. PTC presets that plan through it need `planFirst.allowPtcTransport: true` and a confined file policy.
+- Delegation tools are refused whenever the gate is active, unless `delegation.allow: true` is set.
+- Gate and report state moved out of the session log. Run `dsh-viztools-repair` once for sessions written by older versions. Without the repair, those sessions open with fail-closed gate state: plan approval is required again and limited tools stay refused.
+- Report templates receive `pluginState` (sidecar paths) in `inputs.json`. Custom templates that read `viztools-*` events from the trajectory should call `dsh_viztools.plugin_state.gate_records(session)` instead, which reads all three backends.
 
 ### Automatic reports
 
@@ -204,7 +247,7 @@ Enable the separate report entry to generate a trusted, per-session report witho
 
 Before generation the plugin flushes session persistence and asks the JSONL backend for the exact current trajectory path. It writes `.dsh/reports/<session-id>/report.py`, `inputs.json`, and `report.html`; profile-supplied templates receive only structured inputs and trusted workspace paths. `--no-include-code` produces a code-free export by default.
 
-Generation is idempotent on session, trigger sequence, and template version. Both successful and failed attempts become durable `viztools-report/change` events, so resume does not duplicate an already settled report, and resuming an agent never resets a finished report's state to `pending`. Values extracted from tool results (for example `{runId}`) must match the deployment pattern and must also be a single safe path segment. The bundled template summarizes session metrics, tool calls, plan evidence, and approved run rules.
+Generation is idempotent on session, trigger sequence, and template version. Both successful and failed attempts become durable records on the plugin `report` channel, so resume does not duplicate an already settled report, and resuming an agent never resets a finished report's state to `pending`. Values extracted from tool results (for example `{runId}`) must match the deployment pattern and must also be a single safe path segment. The bundled template is laid out for the right sidebar. It shows the plan text and approval time, and a **Rules vs. what happened** table: for each tool, the rule (allowed, denied, not in the allowlist), its limit, how many calls started, and how many were refused before and after approval. It also has a narrow tool table without an argument column (arguments are in a collapsed section) and the approved run rules.
 
 When DSH web is present, the report entry serves finished exports at `/api/viztools/report?session=<id>`. That route sits behind DSH's Host/Origin and browser-session authentication and does not depend on marimo. It serves only an `available` export that resolves to that session's `report.html`, with `Cache-Control: no-store` and `Content-Security-Policy: sandbox allow-scripts …`, so report scripts run in an opaque origin and cannot call DSH APIs as the operator.
 
@@ -226,7 +269,9 @@ Locked mode serves the plugin-owned viewer app bundled in the package. It works 
     environmentDir: .dsh/marimo
 ```
 
-This mode runs `marimo run`, sends no notebook source to the browser, hides detailed tracebacks, exposes no marimo MCP endpoint, and registers no model-facing marimo tools or notebook skills. For the mounted session, the viewer validates the session ID as one safe path segment, polls while the report is pending, embeds the contained export once it is available, and links to the authenticated report route.
+This mode runs `marimo run`, sends no notebook source to the browser, hides detailed tracebacks, exposes no marimo MCP endpoint, and registers no model-facing marimo tools or notebook skills. For the mounted session, the viewer validates the session ID as one safe path segment, polls while the report is pending, embeds the contained export once it is available, and links to the authenticated report route. The export is embedded in a sandboxed iframe at a fixed `80vh` height. `mo.iframe` is not used, because its auto-resize collapsed the frame to about 85 px in the sidebar. Gate notices, such as plan mode being unavailable or damaged state, appear above the report. Set `gateStateDir` to the gate's `stateDir`.
+
+![The original OTX session reopened after a console restart, with the report filling the right sidebar](docs/assets/otx-resume-report.webp)
 
 The package exports `checkLockedProfile()` from `dsh-viztools/profile-check`. Internal profile validation should also inspect the complete composition for duplicate editable runtime entries, untrusted template paths, arbitrary code tools, and exact supported version pins. See [THREAT_MODEL.md](THREAT_MODEL.md).
 
@@ -335,7 +380,9 @@ This MVP reduces accidental exposure but is **not a sandbox**:
 - DSH's Browser layout may retain that URL locally, but its random token becomes useless when this plugin process stops;
 - managed paths stay in the workspace;
 - model tool calls still traverse DSH's normal tool policy and approval pipeline;
-- the browser iframe uses DSH's existing sandbox, including `allow-same-origin` and WebSocket support.
+- the browser iframe uses DSH's existing sandbox, including `allow-same-origin` and WebSocket support;
+- the embedded report frame and the authenticated report route both run the export in an opaque origin (`sandbox` without `allow-same-origin`);
+- gate sidecars and status files are mode 0600 and contain tool names, call ids, decision codes, and reasons only, never arguments or tokens.
 
 Do not install editable mode in a locked production/OTX console. A later read-only profile should run existing notebooks without code-mode MCP and expose only read operations.
 
@@ -360,7 +407,10 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm pack --dry-run
+pnpm test:integration   # real DSH web console, see below
 ```
+
+`pnpm test:integration` boots real DSH 0.2.0-rc.2 web in the OTX console topology: a scripted mock LLM, a stdio MCP fixture that registers its tools late, plan mode plus the gate in the preset's isolated `planning` group, the locked runtime started from a workspace outside the plugin directory, and a test-only answerer that approves reviews. A headless Chromium drives it at 1910×916. The test checks the sidecar, the bench call log, the report route and viewer, and the report iframe height. It then injects a legacy event, runs `dsh-viztools-repair`, restarts DSH, reopens the original session, and checks that the resumed counts equal the live counts. It needs `dsh` and `zstd` on PATH, and `playwright-core` plus a Chromium binary (`PLAYWRIGHT_CORE_DIR`, `CHROMIUM_PATH`).
 
 Python loader tests run with the system Python and do not require marimo. The live smoke test provisions the uv environment and should be run explicitly against a disposable DSH profile.
 

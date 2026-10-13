@@ -255,7 +255,12 @@ Before an internal rollout, the following scenarios must pass end to end:
 - [x] Remediation C: durable refusal audit at decision time.
 - [x] Remediation D: contained viewer, authenticated report route, polling, resume-safe state.
 - [x] Real-profile integration test (`pnpm test:integration`).
-- [ ] Durable plugin state that survives a DSH restart (decision pending).
+- [x] Durable plugin state that survives a DSH restart. Implemented as option 3: an rc.2 sidecar, plus `appendPluginRecord` when available (2026-10-13).
+- [x] Repair/migration for legacy sessions (`dsh-viztools-repair`).
+- [x] 2026-10-13 real-console findings: viewer height, `run_code` gate bypass, invalid rules widening, delegation escape, LOW items, OTX report content.
+- [ ] Internal acceptance re-run on the real OTX console (see `SECURITY_REVIEW.md`).
+
+**Milestone status (2026-10-13):** no automated blockers are open. `pnpm check` and `pnpm test:integration` (41/41) pass. Promotion still needs the internal acceptance items.
 
 ## Dependency order
 

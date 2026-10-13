@@ -1,28 +1,32 @@
+import { renameSync, writeFileSync, mkdirSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { SessionEventMap } from '@deepseek-ai/dsh-session'
 import { EXIT_PLAN_MODE } from '@deepseek-ai/dsh-plan-mode'
 import type {} from '@deepseek-ai/dsh-user-questions'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { foldGate, GATE_EVENT_TYPE, type GateChange, type GateState } from './gate-domain.js'
-import { decideTool, expandPatterns, type GateDenial } from './gate-policy.js'
-import { applyRunRulesChange, deploymentFingerprint, foldRunRules, initialRunRulesState, rulesValidForDeployment, RUN_RULES_EVENT, RUN_RULES_VERSION, type RunRules, type RunRulesChange, type RunRulesState } from './run-rules.js'
+import { decideTool, DELEGATION_TOOLS, expandPatterns, RUN_CODE, type GateDenial } from './gate-policy.js'
+import { applyGateRecord, evaluateTrust, foldGateRecords, type GateFold, type GateRecordKind } from './gate-state.js'
+import { isSafeSessionId } from './managed-state.js'
+import { deploymentFingerprint, rulesValidForDeployment, RUN_RULES_VERSION, type RunRules } from './run-rules.js'
+import { openStateStore, type JsonValue, type PluginRecordApi, type StateStore } from './state-store.js'
 
 export { GATE_EVENT_TYPE, decodeGateChange, foldGate, initialGateState } from './gate-domain.js'
 export type { GateChange, GateState } from './gate-domain.js'
+export { DELEGATION_TOOLS, RUN_CODE } from './gate-policy.js'
 
 export const name = 'dsh-viztools-gate'
 export const inject = ['tools', 'userQuestions', 'systemPrompt']
 
 export const PROPOSE_RUN_RULES = 'propose_run_rules'
-export const RUN_CODE = 'run_code'
-export const DELEGATION_TOOLS: ReadonlySet<string> = new Set(['subagent', 'subagent_fork', 'workflow'])
+export const DEFAULT_STATE_DIR = '.dsh/viztools/state'
 
 export interface PlanFirstConfig {
   enabled?: boolean
   planningTools?: string[]
   denialMessage?: string
+  allowPtcTransport?: boolean
 }
 
 export interface RunRulesConfig {
@@ -31,9 +35,16 @@ export interface RunRulesConfig {
   maxLimits?: Record<string, number>
 }
 
+export interface DelegationConfig {
+  allow?: boolean
+}
+
 export interface Config {
   planFirst?: PlanFirstConfig
   runRules?: RunRulesConfig
+  delegation?: DelegationConfig
+  cwd?: string
+  stateDir?: string
 }
 
 export interface ResolvedConfig {
@@ -41,12 +52,18 @@ export interface ResolvedConfig {
     enabled: boolean
     planningTools: string[]
     denialMessage: string
+    allowPtcTransport: boolean
   }
   runRules: {
     enabled: boolean
     allowedTools: string[]
     maxLimits: Record<string, number>
   }
+  delegation: {
+    allow: boolean
+  }
+  cwd: string
+  stateDir: string
 }
 
 export const Config: z<Config, ResolvedConfig> = z.object({
@@ -54,37 +71,58 @@ export const Config: z<Config, ResolvedConfig> = z.object({
     enabled: z.boolean().default(false),
     planningTools: z.array(String).default([]),
     denialMessage: z.string().default('Plan not approved yet.'),
+    allowPtcTransport: z.boolean().default(false),
   }).default({}),
   runRules: z.object({
     enabled: z.boolean().default(false),
     allowedTools: z.array(String).default([]),
     maxLimits: z.dict(Number).default({}),
   }).default({}),
+  delegation: z.object({
+    allow: z.boolean().default(false),
+  }).default({}),
+  cwd: z.string().default(''),
+  stateDir: z.string().default(DEFAULT_STATE_DIR),
 })
 
-declare module '@deepseek-ai/dsh-session/types' {
-  interface SessionEventMap {
-    /** Durable plan-gate approval or refusal audit event. */
-    'viztools-gate/change': GateChange
-    /** Durable approved run rules, started-call counts, and their refusal audit events. */
-    'viztools-run-rules/change': RunRulesChange
-  }
-}
-
 interface AgentGate {
-  state: GateState
-  rules: RunRulesState
+  readonly store: StateStore
+  readonly sessionId: string
+  fold: GateFold
+  /** Set when counts for limited tools can no longer be trusted; sticky for the session. */
+  countsUntrusted?: string
+  /** Set when the session cannot submit a plan (plan mode unavailable). */
+  planNotice?: string
+  stateNotice?: string
   /** Calls that passed this guard but have not yet reached dispatch; they count against limits. */
   readonly reserved: Map<string, string>
-  /** Call ids whose refusal was already persisted. */
+  /** Call ids whose refusal was already persisted (or queued). */
   readonly audited: Set<string>
+  /** Per-call verdicts, so a call evaluated by several guard instances gets one decision. */
+  readonly verdicts: Map<string, string | undefined>
+  /** Records whose durable write failed; retried before the next decision and on results. */
+  readonly pending: { kind: GateRecordKind; data: { [key: string]: JsonValue } }[]
 }
 
 interface PlanModeLike {
   set(agent: Agent, active: boolean): unknown
 }
 
-export function resolveGateConfig(config: ResolvedConfig): ResolvedConfig {
+/** Resolved config, or a partial one (missing keys take their defaults). */
+export type GateInput = { readonly [K in keyof ResolvedConfig]?: ResolvedConfig[K] extends object ? Partial<ResolvedConfig[K]> : ResolvedConfig[K] }
+
+function partial(config: GateInput): ResolvedConfig {
+  return {
+    planFirst: { enabled: false, planningTools: [], denialMessage: 'Plan not approved yet.', allowPtcTransport: false, ...config.planFirst },
+    runRules: { enabled: false, allowedTools: [], maxLimits: {}, ...config.runRules },
+    delegation: { allow: false, ...config.delegation },
+    cwd: config.cwd ?? '',
+    stateDir: config.stateDir ?? DEFAULT_STATE_DIR,
+  }
+}
+
+export function resolveGateConfig(input: GateInput): ResolvedConfig {
+  const config = partial(input)
   const tools = [...new Set(config.planFirst.planningTools.map((tool) => tool.trim()))]
   if (tools.some((tool) => tool.length === 0)) throw new Error('planFirst.planningTools entries must be non-empty')
   const denialMessage = config.planFirst.denialMessage.trim()
@@ -100,18 +138,10 @@ export function resolveGateConfig(config: ResolvedConfig): ResolvedConfig {
     if (outside.length > 0) throw new Error(`planFirst.planningTools must stay inside runRules.allowedTools: ${outside.join(', ')}`)
   }
   return {
+    ...config,
     planFirst: { ...config.planFirst, planningTools: tools, denialMessage },
     runRules: { ...config.runRules, allowedTools, maxLimits: { ...config.runRules.maxLimits } },
   }
-}
-
-function append(agent: Agent, change: GateChange): void {
-  agent.session.append(GATE_EVENT_TYPE, change as SessionEventMap[typeof GATE_EVENT_TYPE])
-}
-
-function appendRules(agent: Agent, change: RunRulesChange): number {
-  agent.session.append(RUN_RULES_EVENT, change as SessionEventMap[typeof RUN_RULES_EVENT])
-  return Number(agent.session.seq) - 1
 }
 
 function validateRules(rules: RunRules, config: ResolvedConfig['runRules'], registryTools: string[]): RunRules {
@@ -152,62 +182,152 @@ function warn(ctx: Context, message: string): void {
   else console.warn(`dsh-viztools-gate: ${message}`)
 }
 
+/** Latest `sandbox/mode` recorded in the session log, if any. */
+export function sessionSandboxMode(agent: Pick<Agent, 'session'>): string | undefined {
+  const events = agent.session.snapshotEvents()
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index]
+    if ((event?.type as string | undefined) === 'sandbox/mode') {
+      const mode = ((event as { data: unknown }).data as { mode?: unknown }).mode
+      return typeof mode === 'string' ? mode : undefined
+    }
+  }
+  return undefined
+}
+
+function errorCode(result: unknown): string | undefined {
+  const info = (result as { error?: { info?: { code?: unknown } } } | undefined)?.error?.info
+  return typeof info?.code === 'string' ? info.code : undefined
+}
+
+export interface GateTestHooks {
+  /** Force a backend in tests: a plugin-record API, or `null` for the sidecar. */
+  readonly pluginRecords?: PluginRecordApi | null
+}
+
 /** Install the durable plan-first and run-rules enforcement gate. */
-export function apply(ctx: Context, input: ResolvedConfig): void {
+export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {}): void {
   const config = resolveGateConfig(input)
   if (!config.planFirst.enabled && !config.runRules.enabled) return
 
+  const stateRoot = resolve(config.cwd || process.cwd(), config.stateDir)
   const planningTools = new Set(config.planFirst.planningTools)
-  const controlTools = new Set<string>([RUN_CODE])
+  const controlTools = new Set<string>()
   if (config.planFirst.enabled) controlTools.add(EXIT_PLAN_MODE)
   if (config.runRules.enabled) controlTools.add(PROPOSE_RUN_RULES)
+  const limitedTools = new Set(config.runRules.enabled ? Object.keys(config.runRules.maxLimits) : [])
   const gates = new WeakMap<Agent, AgentGate>()
+  const gatesBySession = new Map<string, AgentGate>()
+  /** Gates with a delegation call in flight, used to attach the child that call creates. */
+  const delegating = new Map<string, AgentGate>()
   const deploymentAllowed = new Set(config.runRules.allowedTools)
   const fingerprint = deploymentFingerprint(config.runRules.allowedTools, config.runRules.maxLimits)
 
-  /** Replay durable state; invalid or foreign-deployment rules are dropped (never widened). */
-  function replay(agent: Agent): AgentGate {
-    const events = agent.session.snapshotEvents()
-    const state = foldGate(events)
-    let rules = config.runRules.enabled ? foldRunRules(events) : initialRunRulesState()
-    if (rules.rules !== undefined && !rulesValidForDeployment(rules.rules, deploymentAllowed, config.runRules.maxLimits)) {
-      const { rules: _invalidRules, approvedAtSeq: _approvedAtSeq, ...safeState } = rules
-      rules = safeState
+  function publishStatus(gate: AgentGate): void {
+    if (!isSafeSessionId(gate.sessionId)) return
+    const target = join(stateRoot, `${gate.sessionId}.status.json`)
+    const status = {
+      sessionId: gate.sessionId,
+      backend: gate.store.backend,
+      planApproved: gate.fold.approved,
+      ...(gate.planNotice === undefined ? {} : { planNotice: gate.planNotice }),
+      ...(gate.stateNotice === undefined ? {} : { stateNotice: gate.stateNotice }),
+      ...(gate.countsUntrusted === undefined ? {} : { countsUntrusted: gate.countsUntrusted }),
+      ...(config.runRules.enabled && gate.fold.rulesInvalid !== undefined ? { rulesInvalid: gate.fold.rulesInvalid } : {}),
+      updatedAt: Date.now(),
     }
-    const gate: AgentGate = { state, rules, reserved: new Map(), audited: new Set() }
+    try {
+      mkdirSync(dirname(target), { recursive: true, mode: 0o700 })
+      const temporary = `${target}.tmp-${process.pid}`
+      writeFileSync(temporary, JSON.stringify(status, null, 2), { mode: 0o600 })
+      renameSync(temporary, target)
+    } catch (error) {
+      warn(ctx, `could not publish gate status for ${gate.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  /** Durably record and apply one change; on failure retry once, then queue it. */
+  function record(gate: AgentGate, kind: GateRecordKind, data: { [key: string]: JsonValue }): boolean {
+    flushPending(gate)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const written = gate.store.append(kind, data)
+        gate.fold = applyGateRecord(gate.fold, written)
+        return true
+      } catch (error) {
+        if (attempt === 1) warn(ctx, `could not persist gate record ${kind} for ${gate.sessionId}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    gate.pending.push({ kind, data })
+    // Apply in memory anyway so live policy stays at least as strict as intended.
+    gate.fold = applyGateRecord(gate.fold, { kind, data, t: Date.now() })
+    return false
+  }
+
+  function flushPending(gate: AgentGate): void {
+    while (gate.pending.length > 0) {
+      const next = gate.pending[0] as { kind: GateRecordKind; data: { [key: string]: JsonValue } }
+      try {
+        gate.store.append(next.kind, next.data)
+        gate.pending.shift()
+      } catch {
+        return
+      }
+    }
+  }
+
+  /** Replay durable state for one agent's own session and fail closed on any doubt. */
+  function open(agent: Agent): AgentGate {
+    const sessionId = String(agent.id)
+    const store = openStateStore({ root: stateRoot, session: agent.session as never, channel: 'gate', ...(hooks.pluginRecords === undefined ? {} : { pluginRecords: hooks.pluginRecords }) })
+    const snapshot = store.read()
+    let fold = foldGateRecords(snapshot.records)
+    const trust = evaluateTrust(agent.session.snapshotEvents(), snapshot, fold, limitedTools)
+    const gate: AgentGate = { store, sessionId, fold, reserved: new Map(), audited: new Set(), verdicts: new Map(), pending: [] }
+    if (!trust.countsTrusted) gate.countsUntrusted = trust.reason ?? 'dsh-viztools gate counts cannot be trusted'
+    if (trust.needsReset || trust.missing) {
+      // Void approval and rules now (a reset record is written first by the store when damaged).
+      gate.stateNotice = `${trust.reason}. Plan approval was reset${config.runRules.enabled ? ' and saved run rules are refused' : ''}${limitedTools.size > 0 ? '; tools with call limits stay refused for this session' : ''}.`
+      record(gate, 'reset', { reason: trust.reason ?? 'plugin state was damaged' })
+      fold = gate.fold
+    } else if (trust.reason !== undefined) {
+      gate.stateNotice = `${trust.reason}; tools with call limits stay refused for this session.`
+    }
+    if (config.runRules.enabled && fold.rules !== undefined && fold.rulesInvalid === undefined && !rulesValidForDeployment(fold.rules, deploymentAllowed, config.runRules.maxLimits)) {
+      // Never widen: rules that no longer fit the deployment become "deny every governed tool".
+      record(gate, 'rules-invalidated', { reason: 'Saved run rules no longer fit this deployment (allowed tools or limits changed)', fingerprint: fold.rules.deploymentFingerprint })
+    }
     gates.set(agent, gate)
+    gatesBySession.set(sessionId, gate)
     return gate
   }
 
   function liveCounts(gate: AgentGate): Record<string, number> {
-    const counts: Record<string, number> = { ...gate.rules.counts }
+    const counts: Record<string, number> = { ...gate.fold.counts }
     for (const tool of gate.reserved.values()) counts[tool] = (counts[tool] ?? 0) + 1
     return counts
   }
 
-  function applyRules(agent: Agent, gate: AgentGate, change: RunRulesChange): void {
-    const seq = appendRules(agent, change)
-    gate.rules = applyRunRulesChange(gate.rules, change, seq)
-  }
-
   /** Persist a final guard refusal exactly once per call id. */
-  function audit(agent: Agent, gate: AgentGate, callId: string, tool: string, denial: GateDenial): void {
+  function audit(gate: AgentGate, callId: string, tool: string, denial: GateDenial): void {
     if (gate.audited.has(callId)) return
     gate.audited.add(callId)
-    if (denial.code === 'RUN_RULE_DENIED' || denial.code === 'RUN_RULE_LIMIT') {
-      applyRules(agent, gate, {
-        kind: denial.code === 'RUN_RULE_LIMIT' ? 'limit-reached' : 'refused-call', version: RUN_RULES_VERSION, callId, tool, reason: denial.reason,
-        ...(denial.count === undefined ? {} : { count: denial.count }), ...(denial.limit === undefined ? {} : { limit: denial.limit }),
-      })
-    } else {
-      append(agent, { kind: 'refused', version: 1, callId, tool, reason: denial.reason })
-      gate.state = { ...gate.state, refusals: gate.state.refusals + 1 }
-    }
+    record(gate, 'refused', {
+      callId, tool, code: denial.code, reason: denial.reason, beforeApproval: config.planFirst.enabled && !gate.fold.approved,
+      ...(denial.count === undefined ? {} : { count: denial.count }), ...(denial.limit === undefined ? {} : { limit: denial.limit }),
+    })
   }
 
-  /** Whether this call is governed by counting (consumes a limit slot when started). */
+  /** Calls whose start is recorded: every governed (non-control) tool while the gate is active. */
   function counted(tool: string): boolean {
-    return config.runRules.enabled && !controlTools.has(tool)
+    return !controlTools.has(tool)
+  }
+
+  function ptcPolicy(agent: Agent): { allowed: boolean; reason?: string } {
+    if (!config.planFirst.allowPtcTransport) return { allowed: false, reason: 'run_code is refused before plan approval: its program can use Node APIs (fs, net, child_process), so it would bypass the gate. A deployment can opt in with planFirst.allowPtcTransport when the file policy is confined.' }
+    const mode = sessionSandboxMode(agent)
+    if (mode === undefined || mode === 'danger-full-access') return { allowed: false, reason: `run_code is refused before plan approval because the session file policy is ${mode ?? 'unknown'}; it is allowed only under a confined (read-only or workspace-write) policy.` }
+    return { allowed: true }
   }
 
   if (config.runRules.enabled) {
@@ -248,77 +368,119 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
         })
         const item = answer.answers.find((entry) => entry.id === 'run-rules-review')
         if (item?.selected.length !== 1 || item.selected[0] !== 'Approve' || item.custom !== undefined) throw new Error('The user rejected the proposed run rules.')
-        const gate = gates.get(agent) ?? replay(agent)
-        applyRules(agent, gate, { kind: 'approved', version: RUN_RULES_VERSION, callId: String(exec.callId), rules })
+        const gate = gates.get(agent) ?? open(agent)
+        if (!record(gate, 'rules-approved', { callId: String(exec.callId), rules: rules as unknown as JsonValue })) throw new Error('The approved run rules could not be stored durably; they apply to this live session only.')
+        publishStatus(gate)
         return { approved: true }
       },
     }))
   }
 
   ctx.on('agent/created', ({ agent }) => {
-    const gate = replay(agent)
+    const header = agent.session.header as { parentSession?: unknown; delegationDepth?: unknown }
+    const depth = typeof header.delegationDepth === 'number' ? header.delegationDepth : 0
+    const isChild = depth > 0
+    let gate: AgentGate | undefined
+    if (isChild && config.delegation.allow) {
+      // A delegated child shares its parent's gate: same approval, rules, and counts.
+      const byLineage = header.parentSession === undefined ? undefined : gatesBySession.get(String(header.parentSession))
+      gate = byLineage ?? (delegating.size === 1 ? [...delegating.values()][0] : undefined)
+    }
+    if (gate === undefined) {
+      gate = open(agent)
+      if (isChild) {
+        // A child we cannot attach to a governed parent must not get a fresh budget.
+        gate.countsUntrusted ??= 'this delegated agent could not be attached to its parent\'s gate'
+        if (config.runRules.enabled && gate.fold.rulesInvalid === undefined) gate.fold = { ...gate.fold, rulesInvalid: 'This delegated agent could not inherit its parent\'s run rules' }
+      }
+    } else {
+      gates.set(agent, gate)
+    }
+    const current = gate
     agent.ctx.effect(() => agent.ctx.systemPrompt.section({
       name: 'viztools:run-rules-notes',
       order: 700,
       text: () => {
-        const current = gates.get(agent)?.rules.rules
-        if (current === undefined || current.notes.length === 0) return ''
-        return `Approved run-rule notes (advisory; not mechanically enforced):\n${current.notes.map((note) => `- ${note}`).join('\n')}`
+        const rules = gates.get(agent)?.fold.rules
+        if (rules === undefined || rules.notes.length === 0) return ''
+        return `Approved run-rule notes (advisory; not mechanically enforced):\n${rules.notes.map((note) => `- ${note}`).join('\n')}`
       },
     }), 'dsh-viztools.run-rules-notes')
-    if (!gate.state.approved && config.planFirst.enabled) {
+    if (!current.fold.approved && config.planFirst.enabled && !isChild) {
       const planMode = resolvePlanMode(ctx, agent)
-      // Fail closed without breaking session creation: the guard below still refuses
-      // non-planning tools; only the automatic switch into plan mode is lost.
-      if (planMode === undefined) warn(ctx, 'planFirst.enabled: planMode service is not visible; mount dsh-viztools/gate inside the preset `planning` cordis:group that isolates planMode. Non-planning tools stay refused.')
-      else planMode.set(agent, true)
+      if (planMode === undefined) {
+        current.planNotice = 'Plan mode is unavailable in this deployment, so this session cannot submit a plan for approval (mount dsh-viztools/gate inside the preset `planning` group that isolates planMode). Ask the operator.'
+        warn(ctx, `planFirst.enabled: ${current.planNotice}`)
+      } else {
+        planMode.set(agent, true)
+      }
     }
-    // Tool visibility is deliberately NOT checked here: MCP tools register after agent
-    // creation, and `run_code` exists only in PTC presentation. Policy is decided per call.
+    if (!isChild) publishStatus(current)
+
+    // Tool visibility is deliberately NOT checked at creation: MCP tools register later.
     agent.ctx.effect(() => agent.ctx.tools.guard((exec) => {
       const caller = exec.agent
-      const current = caller === undefined ? undefined : gates.get(caller) ?? replay(caller)
+      const active = caller === undefined ? undefined : gates.get(caller)
       const callId = String(exec.callId)
-      let denial: GateDenial | undefined
-      if (current !== undefined && current.rules.rules !== undefined && DELEGATION_TOOLS.has(exec.name)) {
-        denial = { code: 'RUN_RULE_DENIED', reason: 'Forks, subagents, and workflows are disabled while approved OTX run rules govern this session.' }
-      } else {
-        denial = decideTool({
-          knownAgent: current !== undefined,
-          planFirst: config.planFirst.enabled,
-          planApproved: current?.state.approved ?? false,
-          planningTools,
-          controlTools,
-          deploymentRestricted: config.runRules.enabled,
-          deploymentAllowed,
-          deploymentLimits: config.runRules.maxLimits,
-          ...(current?.rules.rules === undefined ? {} : { rules: current.rules.rules }),
-          counts: current === undefined ? {} : liveCounts(current),
-          tool: exec.name,
-          denialMessage: config.planFirst.denialMessage,
-        })
-      }
-      if (current === undefined || caller === undefined) return denial?.reason
+      // Nested scopes can run more than one instance of this guard for the same call.
+      if (active !== undefined && active.verdicts.has(callId)) return active.verdicts.get(callId)
+      if (active !== undefined) flushPending(active)
+      const planNotice = [active?.planNotice, active?.stateNotice].filter((text) => text !== undefined).join(' ')
+      const ptc = exec.name === RUN_CODE && caller !== undefined ? ptcPolicy(caller) : { allowed: false }
+      const denial = decideTool({
+        knownAgent: active !== undefined,
+        planFirst: config.planFirst.enabled,
+        planApproved: active?.fold.approved ?? false,
+        planningTools,
+        controlTools,
+        ptcBeforeApproval: ptc.allowed,
+        ...(ptc.reason === undefined ? {} : { ptcDeniedReason: ptc.reason }),
+        delegationAllowed: config.delegation.allow,
+        deploymentRestricted: config.runRules.enabled,
+        deploymentAllowed,
+        deploymentLimits: config.runRules.maxLimits,
+        ...(active?.fold.rules === undefined ? {} : { rules: active.fold.rules }),
+        ...(config.runRules.enabled && active?.fold.rulesInvalid !== undefined ? { rulesInvalid: active.fold.rulesInvalid } : {}),
+        ...(active?.countsUntrusted === undefined ? {} : { countsUntrusted: active.countsUntrusted }),
+        counts: active === undefined ? {} : liveCounts(active),
+        tool: exec.name,
+        denialMessage: config.planFirst.denialMessage,
+        ...(planNotice === '' ? {} : { planNotice }),
+      })
+      if (active === undefined) return denial?.reason
       if (denial !== undefined) {
         // Guards are monotonic and evaluated once per call, so our denial is final: persist it now.
-        audit(caller, current, callId, exec.name, denial)
+        audit(active, callId, exec.name, denial)
+        active.verdicts.set(callId, denial.reason)
         return denial.reason
       }
-      // Reserve synchronously so parallel calls observe each other before any of them dispatches.
-      if (counted(exec.name)) current.reserved.set(callId, exec.name)
+      // A tool that does not exist will never run: it must not use up a limit slot.
+      const visible = caller === undefined || caller.ctx.tools.get(exec.name, caller) !== undefined
+      if (counted(exec.name) && visible) active.reserved.set(callId, exec.name)
+      if (DELEGATION_TOOLS.has(exec.name)) delegating.set(callId, active)
+      active.verdicts.set(callId, undefined)
       return undefined
     }), 'dsh-viztools.monotonic-gate')
 
-    // Dispatch began: the call passed every guard. Count it durably before the body runs,
-    // so failures still consume the slot and replay matches live state exactly.
+    // Dispatch began: the call passed every guard. Record the start durably before the body
+    // runs, so failures still consume the slot and replay matches live state exactly.
     agent.ctx.on('tools/execute', async (exec, next) => {
-      const current = gates.get(agent)
+      const caller = exec.agent ?? agent
+      const active = gates.get(caller)
       const callId = String(exec.callId)
-      if (current !== undefined && counted(exec.name) && !current.rules.startedCallIds.has(callId)) {
-        current.reserved.delete(callId)
-        applyRules(agent, current, { kind: 'started-call', version: RUN_RULES_VERSION, callId, tool: exec.name })
+      let recorded = false
+      if (active !== undefined && counted(exec.name) && !active.fold.decided.has(callId) && !exec.signal.aborted && caller.ctx.tools.get(exec.name, caller) !== undefined) {
+        active.reserved.delete(callId)
+        record(active, 'started', { callId, tool: exec.name })
+        recorded = true
       }
-      return next()
+      const result = await next()
+      const code = errorCode(result)
+      if (recorded && active !== undefined && (code === 'ABORTED_BEFORE_DISPATCH' || code === 'UNKNOWN_TOOL')) {
+        // The body never ran: give the slot back durably.
+        record(active, 'not-started', { callId, tool: exec.name, reason: code })
+      }
+      return result
     })
     return undefined
   })
@@ -328,14 +490,23 @@ export function apply(ctx: Context, input: ResolvedConfig): void {
     if (agent === undefined) return
     const gate = gates.get(agent)
     if (gate === undefined) return
-    // A reservation that never dispatched (another guard denied, or cancelled before dispatch) is released.
-    gate.reserved.delete(String(exec.callId))
+    const callId = String(exec.callId)
+    delegating.delete(callId)
+    gate.verdicts.delete(callId)
+    flushPending(gate)
+    // A reservation that never dispatched (another guard denied, cancelled before dispatch,
+    // unknown tool) is released, with a durable decision for limited tools.
+    gate.reserved.delete(callId)
+    if (counted(exec.name) && limitedTools.has(exec.name) && !gate.fold.decided.has(callId)) {
+      record(gate, 'not-started', { callId, tool: exec.name, reason: errorCode(result) ?? 'not dispatched' })
+    }
     if (exec.name !== EXIT_PLAN_MODE || result.isError || !config.planFirst.enabled) return
     const value = result.value
     if (typeof value !== 'object' || value === null || Array.isArray(value) || (value as Record<string, unknown>).approved !== true) return
-    if (gate.state.approved) return
-    append(agent, { kind: 'approved', version: 1, planCallId: String(exec.callId) })
-    gate.state = { ...gate.state, approved: true, approvedAtSeq: Number(agent.session.seq) - 1, planCallId: String(exec.callId) }
+    if (gate.fold.approved) return
+    record(gate, 'plan-approved', { planCallId: callId })
+    delete gate.stateNotice
+    publishStatus(gate)
   })
 }
 

@@ -1,5 +1,9 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
+// LEGACY: these `viztools-gate/change` events were written into the DSH session log by
+// dsh-viztools <= ca3b3ca. DSH 0.2.0-rc.2 cannot reopen such logs, so the plugin no longer
+// writes them; this decoder remains only for `dsh-viztools-repair` migration.
+
 export const GATE_EVENT_VERSION = 1
 export const GATE_EVENT_TYPE = 'viztools-gate/change' as const
 
@@ -31,8 +35,8 @@ export function initialGateState(): GateState {
 }
 
 export function decodeGateChange(event: SessionEvent): GateChange | undefined {
-  if (event.type !== GATE_EVENT_TYPE) return undefined
-  const value = event.data as unknown
+  if ((event.type as string) !== GATE_EVENT_TYPE) return undefined
+  const value = (event as { data: unknown }).data
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new Error('viztools gate change must be an object')
   }

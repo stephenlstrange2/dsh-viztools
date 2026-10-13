@@ -145,8 +145,8 @@ export function applyRunRulesChange(state: RunRulesState, change: RunRulesChange
 export function foldRunRules(events: readonly SessionEvent[]): RunRulesState {
   let state = initialRunRulesState()
   for (const event of events) {
-    if (event.type !== RUN_RULES_EVENT) continue
-    state = applyRunRulesChange(state, decodeRunRulesChange(event.data), Number(event.seq))
+    if ((event.type as string) !== RUN_RULES_EVENT) continue
+    state = applyRunRulesChange(state, decodeRunRulesChange((event as { data: unknown }).data), Number(event.seq))
   }
   return state
 }

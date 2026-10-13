@@ -15,9 +15,9 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import marimo as mo
-    from dsh_viztools.managed_view import load_view_state, safe_report_url
+    from dsh_viztools.managed_view import load_gate_status, load_view_state, report_frame, safe_report_url
 
-    return load_view_state, mo, safe_report_url
+    return load_gate_status, load_view_state, mo, report_frame, safe_report_url
 
 
 @app.cell
@@ -29,26 +29,30 @@ def _(mo):
 
 
 @app.cell
-def _(auto_refresh, load_view_state, manual_refresh, mo, safe_report_url):
+def _(auto_refresh, load_gate_status, load_view_state, manual_refresh, mo, safe_report_url):
     auto_refresh.value, manual_refresh.value
     params = mo.query_params()
     view_state = load_view_state(params.get("session", "") or "")
+    gate_notices = load_gate_status(view_state["session"])
     report_url = safe_report_url(params.get("report_url", "") or "")
-    return report_url, view_state
+    return gate_notices, report_url, view_state
 
 
 @app.cell
-def _(auto_refresh, manual_refresh, mo, report_url, view_state):
+def _(auto_refresh, gate_notices, manual_refresh, mo, report_frame, report_url, view_state):
     status = view_state["status"]
+    notices = [mo.callout(mo.plain_text(text), kind="warn") for text in gate_notices]
     session_label = view_state["session"] or "not selected"
     if status == "available":
         header = [mo.md(f"# Run report\n\nSession: `{session_label}`")]
         if report_url:
             header.append(mo.md(f"[Open the report in a new tab]({report_url})"))
         header.append(manual_refresh)
-        view = mo.vstack([*header, mo.iframe(view_state["html"], height="85vh")])
+        # Not mo.iframe: its onload auto-resize shrinks the frame to ~85 px in the sidebar.
+        view = mo.vstack([*notices, *header, mo.Html(report_frame(view_state["html"]))])
     elif status == "failed":
         view = mo.vstack([
+            *notices,
             mo.md(f"# Report generation failed\n\nSession: `{session_label}`"),
             mo.plain_text(view_state["reason"]),
             auto_refresh,
@@ -57,6 +61,7 @@ def _(auto_refresh, manual_refresh, mo, report_url, view_state):
         view = mo.md(f"# Report unavailable\n\n{view_state['reason']}")
     else:
         view = mo.vstack([
+            *notices,
             mo.md(f"# Plan in progress\n\nSession: `{session_label}`\n\nThe trusted report appears here automatically after the terminal run tool completes."),
             auto_refresh,
         ])

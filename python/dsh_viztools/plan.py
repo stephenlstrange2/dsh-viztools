@@ -372,16 +372,16 @@ def explain_plan(
         {"server": server, "operation": operation, "calls": count}
         for (server, operation), count in mcp_counter.most_common()
     ]
+    from .plugin_state import gate_records
+
     approved_rules = None
     rule_refusals: list[dict[str, Any]] = []
-    for event in session.events:
-        if event.get("type") != "viztools-run-rules/change" or not isinstance(event.get("data"), dict):
-            continue
-        change = event["data"]
-        if change.get("kind") == "approved" and isinstance(change.get("rules"), dict):
-            approved_rules = _merge_rules(approved_rules, _decode_rules(change["rules"], change.get("version")))
-        elif change.get("kind") in {"refused-call", "limit-reached"}:
-            rule_refusals.append(change)
+    for record in gate_records(session):
+        data = record.get("data", {})
+        if record.get("kind") == "rules-approved" and isinstance(data.get("rules"), dict):
+            approved_rules = _merge_rules(approved_rules, _decode_rules(data["rules"], 3))
+        elif record.get("kind") == "refused" and data.get("code") in {"RUN_RULE_DENIED", "RUN_RULE_LIMIT"}:
+            rule_refusals.append({**data, "kind": "limit-reached" if data.get("code") == "RUN_RULE_LIMIT" else "refused-call"})
     rules_table: list[dict[str, Any]] = []
     if approved_rules is not None:
         allow = approved_rules.get("allow")

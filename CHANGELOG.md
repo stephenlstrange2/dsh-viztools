@@ -4,6 +4,36 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — real OTX console findings (2026-10-13)
+
+Found while running the plugin on the real OTX console (DSH 0.2.0-rc.2, Fedora VM, real GM E86 run). DSH rc.2 compatibility is kept.
+
+- **BLOCKER fixed: sessions can be reopened after a restart.** The plugin no longer writes `viztools-gate/change`, `viztools-run-rules/change`, or `viztools-report/change` into `session.jsonl`. rc.2 refused to reopen any log containing them, including from a second console sharing the DSH home. On rc.2, state goes to a per-session sidecar under the workspace (`.dsh/viztools/state/<session>.gate.jsonl` / `.report.jsonl`). The sidecar is append-only, fsync'd per record, mode 0600, hash-chained, and forks inherit the parent's records up to the fork point. On DSH versions with `appendPluginRecord`, the plugin uses ignorable `plugin:dsh-viztools/*` records instead. Removing the `SessionEventMap` augmentation makes appending these event types a compile error.
+- **Fail closed on missing or damaged state.** A truncated, edited, or missing sidecar (when the log shows gated activity) resets plan approval and refuses saved rules until they are re-approved. Limited tools stay refused for the session, because their counts can no longer be trusted. The gate also cross-checks the session log: a completed call to a limited tool with no recorded decision has the same effect.
+- **New `dsh-viztools-repair` command** (`bin/`, also `dsh-viztools/repair`) for sessions written by older versions. It has a dry-run mode, backs up each changed log, and exports the legacy state into the sidecar. It then marks legacy events `ignorable` in place, keeping every sequence number, and keeps the zstd layout with the header alone in the first frame, which DSH's session lister depends on. It leaves the projection cache in place, because DSH lists sessions from it.
+- **Viewer fix:** the report is no longer an 85 px strip. `mo.iframe`'s auto-resize was replaced by a sandboxed `srcdoc` iframe at a fixed `80vh` height. Gate notices (plan mode unavailable, damaged state, untrusted counts, invalid rules) appear above the report.
+- **HIGH fixed: `run_code` no longer bypasses the gate.** It is refused before approval unless the deployment sets `planFirst.allowPtcTransport: true` and the file policy is confined. After approval it is governed like any tool. The misleading "harmless" comment was corrected, and the risk is documented in `THREAT_MODEL.md`.
+- **MEDIUM fixed: invalid saved rules no longer widen access.** Every governed tool is refused with a clear message, a `rules-invalidated` audit record is written, and a fresh approval replaces the stale rules.
+- **MEDIUM fixed: delegation cannot escape the parent's limits.** Delegation is refused whenever the gate is active unless `delegation.allow: true`. With the opt-in, children share the parent's gate (approval, rules, counts). Unattachable children get no fresh budget.
+- **LOW fixed:**
+  - a missing plan mode is shown in the refusal text and in the viewer;
+  - aborts after the reservation but before the body runs, and calls to tools that don't exist, do not use a limit slot;
+  - if the durable write fails, the refusal is retried once, then queued and persisted on the next decision;
+  - the guard is idempotent per call when nested scopes evaluate it twice.
+- **Report content for OTX:**
+  - plan text and approval time;
+  - a "Rules vs. what happened" table (rule, limit, started, refused before and after approval, per tool);
+  - a tool table narrow enough for the sidebar, with arguments moved to a collapsed section.
+- **Config:** new optional keys only (`planFirst.allowPtcTransport`, `delegation.allow`, gate `cwd`/`stateDir`, report `stateDir`/`gateStateDir`, runtime `gateStateDir`). See the README migration notes.
+- **Tests:** `pnpm check` runs 118 TypeScript and 31 Python tests. New suites:
+  - `gate-runtime` (real `ToolRuntime`: sidecar, restart, truncation, hash chain, missing state, run_code, invalid rules, delegation, abort, unknown tool, failed writes, plan-mode notice, plugin records);
+  - `state-store`, `repair` (validated against rc.2's own `validateStoredEvents`);
+  - Python `plugin_state` and viewer.
+
+  `pnpm test:integration` passes all 41 checks. The two checks that failed before ("persisted session history loads after a DSH restart" and "resumed session accepts a new turn") now pass, along with: resumed counts equal live counts, the resumed gate refuses at the limit, legacy repair, and a report iframe at least 60% of the viewport height at 1910×916.
+
+![The original OTX session reopened after a console restart, with the report filling the right sidebar](docs/assets/otx-resume-report.webp)
+
 ### Security — real-console remediation (2026-10-12)
 
 The real OTX console review overturned the Phase 8 "hardening complete" claim. **OTX promotion is blocked again.**
