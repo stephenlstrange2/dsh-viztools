@@ -234,12 +234,72 @@ describe('keyed chain and out-of-workspace anchor (item 1, PoCs)', () => {
   })
 })
 
+describe('schema-invalid gate configuration fails closed through the real cordis loader (3526c45 HIGH 1)', () => {
+  // ctx.plugin(<module namespace>, rawConfig) is how DSH's loader mounts the entry: cordis runs
+  // `Config["~standard"].validate` first. A strict schema there threw BEFORE apply, the entry
+  // stayed inactive, and tools ran ungated.
+  async function mount(rawConfig: Record<string, unknown>) {
+    const root = await mkdtemp(join(tmpdir(), 'viztools-gate-'))
+    const ctx = new Context()
+    await ctx.plugin(SystemPrompt, {} as never).await()
+    await ctx.plugin(ToolRuntime).await()
+    ctx.provide('userQuestions', { ask: async () => ({ answers: [] }) } as never)
+    ctx.provide('planMode', { set: () => 'committed' } as never)
+    const ran: string[] = []
+    ctx.tools.register(ok('replay', () => { ran.push('replay'); return { ok: true } }))
+    let loadError: unknown
+    try { await ctx.plugin(gate as never, { cwd: root, ...rawConfig } as never).await() } catch (error) { loadError = error }
+    const agentCtx = { tools: ctx.tools, on: ctx.on.bind(ctx), get: ctx.get.bind(ctx), effect: (fn: () => unknown) => fn(), systemPrompt: { section: () => () => undefined } }
+    const agent = { id: 'cfg', session: Session.create('cfg' as never), ctx: agentCtx }
+    await (ctx as unknown as { parallel: (...args: unknown[]) => Promise<void> }).parallel('agent/created', { agent })
+    const result = await ctx.tools.execute({ callId: 'c' as never, name: 'replay', arguments: {}, agent: agent as never, signal: new AbortController().signal })
+    return { loadError, result, ran, text: result.content.map((block) => (block as { text?: string }).text ?? '').join('') }
+  }
+  const valid = { planFirst: { enabled: true, planningTools: [] }, runRules: { enabled: true, allowedTools: ['replay'], maxLimits: { replay: 2 } }, keyProtection: { safeTools: ['replay'] } }
+
+  for (const [label, rawConfig] of [
+    ['planFirst.enabled: "yes"', { ...valid, planFirst: { enabled: 'yes' } }],
+    ['keyProtection.safeTools: "x"', { ...valid, keyProtection: { safeTools: 'replay' } }],
+    ['runRules.maxLimits { replay: "two" }', { ...valid, runRules: { enabled: true, allowedTools: ['replay'], maxLimits: { replay: 'two' } } }],
+    ['runRules: "on"', { ...valid, runRules: 'on' }],
+    ['safeTools: [42]', { ...valid, keyProtection: { safeTools: [42] } }],
+  ] as const) {
+    it(`${label} → the entry loads and every tool is refused`, async () => {
+      const mounted = await mount(rawConfig as Record<string, unknown>)
+      expect(mounted.loadError).toBeUndefined()
+      expect(mounted.result.isError).toBe(true)
+      expect(mounted.text).toMatch(/gate configuration is invalid .*every tool is refused/)
+      expect(mounted.ran).toEqual([])
+    })
+  }
+
+  it('the exported Config accepts anything, while StrictConfig still validates', async () => {
+    expect(gate.Config['~standard'].validate({ planFirst: { enabled: 'yes' } })).not.toHaveProperty('issues')
+    expect(() => gate.StrictConfig({ planFirst: { enabled: 'yes' } } as never)).toThrow(/expected boolean/)
+    const mounted = await mount(valid)
+    expect(mounted.loadError).toBeUndefined()
+    expect(mounted.text).toMatch(/Plan not approved yet/) // a valid config still gates normally
+  })
+})
+
 describe('keyProtection.safeTools validation and MCP server scoping (8bbc07f LOW 1)', () => {
   it('trims entries and rejects "", "*", bare "mcp__*" and other all-MCP or partial-server patterns', async () => {
     const { resolveSafeTools } = await import('../src/gate.js')
     expect(resolveSafeTools(['  mcp__otx__*  ', 'replay ', 'replay'])).toEqual(['mcp__otx__*', 'replay'])
-    for (const bad of ['', '   ', '*', 'mcp__*', 'mcp_*', 'mcp*', 'm*', 'mcp__ot*', 'mcp__otx_*', 'mcp__**', 'mcp__a b__*']) {
+    for (const bad of ['', '   ', '*', 'mcp__*', 'mcp_*', 'mcp*', 'm*', 'mcp__ot*', 'mcp__otx_*', 'mcp__**', 'mcp__a b__*',
+      // 3526c45 MEDIUM 2: generic prefixes and '*' anywhere but the server-wildcard tail.
+      'b*', 'r*', 'read*', 'a*', '*x', 're*d', 'mcp__otx__x*', 'mcp__otx__**', 'mcp__*__*', 'mcp__otx*__*', 'mcp__otx__evil__*', 'mcp__' + 'a'.repeat(33) + '__*']) {
       expect(() => resolveSafeTools([bad]), bad).toThrow(/safeTools entry/)
+    }
+  })
+
+  it('exact names stay allowed, and a generic prefix can never match even if it slipped past validation', async () => {
+    const { resolveSafeTools, safePatternMatches } = await import('../src/gate.js')
+    expect(resolveSafeTools(['bash', 'read_mcp_resource', 'mcp__otx__diff', 'mcp__otx_a__*'])).toEqual(['bash', 'read_mcp_resource', 'mcp__otx__diff', 'mcp__otx_a__*'])
+    for (const tool of ['bash', 'read', 'read_mcp_resource', 'run_code']) {
+      expect(safePatternMatches('b*', tool)).toBe(false)
+      expect(safePatternMatches('r*', tool)).toBe(false)
+      expect(safePatternMatches('read*', tool)).toBe(false)
     }
   })
 

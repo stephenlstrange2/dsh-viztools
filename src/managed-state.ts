@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
@@ -54,8 +55,15 @@ export async function readManagedState(root: string, sessionId: string): Promise
 export async function publishManagedState(root: string, state: ManagedReportState): Promise<string> {
   const target = managedStatePath(root, state.sessionId)
   await mkdir(dirname(target), { recursive: true })
-  const temporary = `${target}.tmp-${process.pid}-${Date.now()}`
-  await writeFile(temporary, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 })
-  await rename(temporary, target)
+  // Unique, exclusively created temp name: concurrent publishes (same process, same
+  // millisecond) never share or clobber a temp file, and a planted name is never followed.
+  const temporary = `${target}.tmp-${process.pid}-${randomBytes(8).toString('hex')}`
+  try {
+    await writeFile(temporary, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+    await rename(temporary, target)
+  } catch (error) {
+    await rm(temporary, { force: true })
+    throw error
+  }
   return target
 }

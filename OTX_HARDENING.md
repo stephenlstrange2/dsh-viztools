@@ -56,10 +56,16 @@ Status: **automated blockers closed; internal acceptance pending** (see `SECURIT
 2. A group- or world-writable key directory is refused rather than tightened; anchor files must be our own, not linked, and not group-writable. Tests: `state-store`.
 3. The report retries after a `KeyNotReady` timeout instead of disabling reports. Tests: `report-resume`.
 
+## Follow-ups on 3526c45 (2026-10-14)
+
+1. **HIGH:** a schema-invalid config failed open (cordis rejected it before `apply`). Now the exported `Config` is permissive and the strict schema runs inside `apply`, refusing every tool. Tests: `gate-runtime`, through cordis's real config path.
+2. **MEDIUM:** `safeTools` wildcards are only `mcp__<server>__*` with an unambiguous server. Tests: `gate-runtime`.
+3. **LOW:** "Gave up" state, one end-to-end retry window, deduplicated waiters, race-safe state publishing, and refusal of a replaceable key-dir parent. Tests: `report-resume`, `managed-state`, `state-store`.
+
 ## Evidence
 
 ```text
-pnpm check:            165 TypeScript tests, 34 Python tests passed
+pnpm check:            176 TypeScript tests, 34 Python tests passed
 pnpm test:integration: 53/53 checks passed (Chromium + Firefox; restart, resume, repair, live-lease refusal)
 ```
 

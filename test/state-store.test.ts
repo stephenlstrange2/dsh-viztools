@@ -258,6 +258,21 @@ describe('follow-up hardening (e27dbcf PoCs)', () => {
     expect(readAnchor(keyring, 'an1', 'gate')).toBe('invalid')
   })
 
+  it('refuses a key directory whose parent is group/other-writable without the sticky bit (3526c45 LOW 3)', async () => {
+    const { base } = await fixture()
+    const { chmod, mkdir } = await import('node:fs/promises')
+    const open = join(base, 'open-parent')
+    await mkdir(open)
+    await chmod(open, 0o777)
+    expect(() => loadKeyring(join(open, 'viztools'))).toThrow(/writable by group or others without the sticky bit/)
+    await chmod(open, 0o1777) // sticky, like /tmp: owners only can rename their entries
+    expect(() => loadKeyring(join(open, 'viztools'))).not.toThrow()
+    const group = join(base, 'group-parent')
+    await mkdir(group)
+    await chmod(group, 0o770)
+    expect(() => loadKeyring(join(group, 'viztools'))).toThrow(/without the sticky bit/)
+  })
+
   it('compares the key directory with the workspace by realpath', async () => {
     const { base } = await fixture()
     const { mkdir, symlink } = await import('node:fs/promises')

@@ -14,6 +14,14 @@ describe('stable managed report state', () => {
     expect(JSON.parse(await readFile(target, 'utf8'))).toMatchObject({ status: 'available', html: '/reports/session-1/report.html' })
   })
 
+  it('publishes concurrently without temp-name collisions (race-safe rename)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'viztools-state-'))
+    const { readdir } = await import('node:fs/promises')
+    await Promise.all(Array.from({ length: 40 }, (_, index) => publishManagedState(root, { status: 'pending', sessionId: 'race', updatedAt: index })))
+    expect(JSON.parse(await readFile(managedStatePath(root, 'race'), 'utf8')).status).toBe('pending')
+    expect((await readdir(join(root, 'race'))).filter((name) => name !== 'state.json')).toEqual([])
+  })
+
   it('rejects unsafe session ids', () => {
     expect(() => managedStatePath('/reports', '../escape')).toThrow(/invalid/)
   })

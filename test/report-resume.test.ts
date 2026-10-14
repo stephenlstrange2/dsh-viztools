@@ -86,7 +86,7 @@ describe('report state across resume', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
       state = JSON.parse(await readFile(statePath, 'utf8').catch(() => '{}'))
     }
-    expect(state?.reason).toMatch(/Report key is not ready yet; retrying/)
+    expect(state?.reason).toMatch(/Report key is not ready yet; waiting up to/)
     // The key arrives; the very same report is retried and now records its outcome durably.
     await writeFile(join(keyDir, 'sidecar.key'), 'd'.repeat(64))
     const sidecar = join(cwd, '.dsh/viztools/state', 'kr1.report.jsonl')
@@ -98,5 +98,52 @@ describe('report state across resume', () => {
     expect(records).toMatch(/"kind":"failed"/) // no real marimo here: the export fails, but the outcome is stored
     state = JSON.parse(await readFile(statePath, 'utf8'))
     expect(state?.reason ?? '').not.toMatch(/key/)
+  }, 20_000)
+
+  async function keyless() {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const cwd = await mkdtemp(join(tmpdir(), 'viztools-resume-'))
+    const keyDir = join(await mkdtemp(join(tmpdir(), 'viztools-keys-')), 'k')
+    await mkdir(keyDir, { mode: 0o700 })
+    await writeFile(join(keyDir, 'sidecar.key'), '', { mode: 0o600 })
+    const ctx = new Context()
+    const warnings: string[] = []
+    ;(ctx as unknown as { logger: unknown }).logger = { warn: (text: string) => warnings.push(text), info() {}, error() {} }
+    ctx.provide('sessionPersistence', { flush: async () => undefined } as never)
+    const config = (report.Config as unknown as (value: Record<string, unknown>) => report.ResolvedConfig)({ enabled: true, cwd, outputDir: '.dsh/reports', triggerOnTurnStop: true, keyDir })
+    await ctx.plugin({ name: 'report-hooked', inject: report.inject, apply: (inner: Context) => report.apply(inner, config, { keyRetryDelayMs: 20 }) } as never, {} as never).await()
+    const agent = { id: 'kg1', session: Session.create('kg1' as never), ctx }
+    const stop = (turn: number) => (ctx as unknown as { emit: (...args: unknown[]) => void }).emit('agent/turn-stopping', { agent, turn })
+    return { cwd, keyDir, stop, warnings, agent, statePath: managedStatePath(join(cwd, '.dsh/reports'), 'kg1') }
+  }
+
+  it('publishes a "gave up" state after the whole retry window, measured end to end (3526c45 LOW 3)', async () => {
+    const h = await keyless()
+    const started = Date.now()
+    h.stop(1)
+    let state: { reason?: string } = {}
+    for (let i = 0; i < 200 && !/Gave up/.test(state.reason ?? ''); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      state = JSON.parse(await readFile(h.statePath, 'utf8').catch(() => '{}'))
+    }
+    const elapsed = Date.now() - started
+    expect(state.reason).toMatch(/^Gave up: the report key was not ready/)
+    expect(state.reason).not.toMatch(/retrying \(12\/12\)/)
+    // 12 x 20 ms window: no inner wait multiplies it (the old code waited ~1 s per attempt).
+    expect(elapsed).toBeLessThan(2_000)
+    expect(elapsed).toBeGreaterThanOrEqual(12 * 20 - 30)
+  }, 20_000)
+
+  it('de-duplicates concurrent retries: one shared key wait, one waiter per report', async () => {
+    const h = await keyless()
+    const { readdir } = await import('node:fs/promises')
+    for (let i = 0; i < 5; i++) h.stop(1) // the same turn reported five times
+    await new Promise((resolve) => setTimeout(resolve, 0)) // let turn 1 capture its sequence
+    ;(h.agent.session as unknown as { append(type: string, data: unknown): void }).append('plan/mode', { active: false })
+    h.stop(2) // and a different report (a later session sequence)
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(h.warnings.filter((text) => /gave up waiting for the key/.test(text))).toHaveLength(2)
+    // Concurrent state publishes never left a temp file behind (unique, exclusive names).
+    expect((await readdir(join(h.cwd, '.dsh/reports', 'kg1'))).filter((name) => name.includes('.tmp-'))).toEqual([])
   }, 20_000)
 })

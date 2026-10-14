@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeysFromRecords, reportKey, type ReportChange } from './report-domain.js'
-import { assertKeyDirOutside, defaultKeyDir, KeyNotReadyError, loadKeyringAsync, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
+import { assertKeyDirOutside, defaultKeyDir, KeyNotReadyError, loadKeyring, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 import { isSafeSessionId, publishManagedState, readManagedState, REPORT_ROUTE, reportRouteUrl } from './managed-state.js'
 import { serveReport } from './report-route.js'
@@ -204,31 +204,67 @@ export function apply(ctx: Context, config: ResolvedConfig, hooks: ReportTestHoo
     else console.warn(`dsh-viztools-report: ${message}: ${detail}`)
   }
 
-  /** Load the key on timers (a concurrently created key may not be written yet); never blocks. */
-  const ensureKeyring = async (): Promise<void> => {
-    if (keyring !== undefined || keyFailure !== undefined) return
-    keyring = await loadKeyringAsync(keyDir)
-    for (const notice of keyring.notices ?? []) report('key directory', notice)
+  const retryDelayMs = hooks.keyRetryDelayMs ?? 5_000
+  /** Total time one wait may take: every attempt, sleeps included, counts against it. */
+  const keyWaitWindowMs = KEY_NOT_READY_RETRIES * retryDelayMs
+  const publishSafely = (sessionId: string, reason: string): void => {
+    if (!isSafeSessionId(sessionId)) return
+    void publishManagedState(outputRoot, { status: 'failed', sessionId, reason, updatedAt: Date.now() })
+      .catch((publishError: unknown) => report(`could not publish report state for ${sessionId}`, publishError))
   }
-
-  const generate = (agent: Agent, triggerSeq: number, trigger: string, attempt = 0): Promise<void> => {
-    if (keyring === undefined && keyFailure === undefined) {
-      return ensureKeyring().then(() => generate(agent, triggerSeq, trigger), (error: unknown) => {
-        if (error instanceof KeyNotReadyError) {
-          // Transient (the key is still being written): keep reports enabled and retry THIS
-          // report later; never disable reporting until a restart.
-          const sessionId = String(agent.id)
-          if (isSafeSessionId(sessionId)) {
-            void publishManagedState(outputRoot, { status: 'failed', sessionId, reason: `Report key is not ready yet; retrying (${attempt + 1}/${KEY_NOT_READY_RETRIES})`, updatedAt: Date.now() })
-              .catch((publishError: unknown) => report(`could not publish report state for ${sessionId}`, publishError))
-          }
-          if (attempt + 1 >= KEY_NOT_READY_RETRIES) { report(`report for ${sessionId} gave up waiting for the key`, error); return }
-          return new Promise<void>((resolveLater) => { const timer = setTimeout(resolveLater, hooks.keyRetryDelayMs ?? 5_000); timer.unref?.() })
-            .then(() => generate(agent, triggerSeq, trigger, attempt + 1))
+  /** ONE shared wait for a key that another process is still writing (never blocks; resets after). */
+  let keyWait: Promise<'ready' | 'gave-up'> | undefined
+  const waitForKey = (): Promise<'ready' | 'gave-up'> => {
+    keyWait ??= (async () => {
+      const deadline = Date.now() + keyWaitWindowMs
+      for (;;) {
+        try {
+          // A single synchronous attempt (no inner wait), so the whole window is this loop.
+          keyring = loadKeyring(keyDir)
+          for (const notice of keyring.notices ?? []) report('key directory', notice)
+          return 'ready' as const
+        } catch (error) {
+          if (!(error instanceof KeyNotReadyError)) throw error
+          const left = deadline - Date.now()
+          if (left <= 0) return 'gave-up' as const
+          await new Promise((resolveLater) => { const timer = setTimeout(resolveLater, Math.min(retryDelayMs, left)); timer.unref?.() })
         }
-        keyFailure = error instanceof Error ? error.message : String(error)
-        return generate(agent, triggerSeq, trigger)
-      })
+      }
+    })().finally(() => { keyWait = undefined })
+    return keyWait
+  }
+  /** Reports waiting for the key, by report key: concurrent triggers share one waiter. */
+  const waiting = new Map<string, Promise<void>>()
+
+  const generate = (agent: Agent, triggerSeq: number, trigger: string): Promise<void> => {
+    if (keyring === undefined && keyFailure === undefined) {
+      try {
+        keyring = loadKeyring(keyDir)
+        for (const notice of keyring.notices ?? []) report('key directory', notice)
+      } catch (error) {
+        if (!(error instanceof KeyNotReadyError)) {
+          keyFailure = error instanceof Error ? error.message : String(error)
+          return generate(agent, triggerSeq, trigger)
+        }
+        // Transient (the key is still being written): keep reports enabled and retry THIS report
+        // once the key is ready; never disable reporting until a restart.
+        const waitKey = reportKey(String(agent.id), triggerSeq, config.templateVersion)
+        const already = waiting.get(waitKey)
+        if (already !== undefined) return already
+        const sessionId = String(agent.id)
+        publishSafely(sessionId, `Report key is not ready yet; waiting up to ${Math.round(keyWaitWindowMs / 1000)} s`)
+        const chain = waitForKey().then((outcome) => {
+          if (outcome === 'ready') return generate(agent, triggerSeq, trigger)
+          report(`report for ${sessionId} gave up waiting for the key`, `not ready after ${Math.round(keyWaitWindowMs / 1000)} s`)
+          publishSafely(sessionId, `Gave up: the report key was not ready after ${Math.round(keyWaitWindowMs / 1000)} s. The next report will try again.`)
+          return undefined
+        }, (waitError: unknown) => {
+          keyFailure = waitError instanceof Error ? waitError.message : String(waitError)
+          return generate(agent, triggerSeq, trigger)
+        }).finally(() => waiting.delete(waitKey))
+        waiting.set(waitKey, chain)
+        return chain
+      }
     }
     const key = reportKey(String(agent.id), triggerSeq, config.templateVersion)
     try {

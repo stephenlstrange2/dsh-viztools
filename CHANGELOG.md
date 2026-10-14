@@ -4,6 +4,22 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — follow-ups on 3526c45 (2026-10-14, PoCs in /tmp/vzr5 reproduced)
+
+- **HIGH 1: schema-invalid gate config no longer fails open.** cordis validated `apply.Config` before `apply`, so `planFirst.enabled: "yes"`, `safeTools: "x"`, or `maxLimits: { replay: "two" }` threw a `ValidationError`, left the entry inactive, and let every tool run ungated. The exported `Config` is now `z.any()`; the real schema (`StrictConfig`) runs inside `apply`, and any failure (schema or semantic) refuses every tool with the reason. A non-object config is also refused. Side effect: `dsh --dump-config-schema` no longer lists the gate's fields.
+- **MEDIUM 2: `safeTools` wildcards** are accepted only as `mcp__<server>__*`. Generic prefixes (`b*`, `r*`, `read*`), a `*` anywhere else, and ambiguous server names (containing `__`, or starting or ending with `_`, e.g. `mcp__otx__evil__*`) are rejected. Exact names stay allowed. The matcher also refuses any wildcard that isn't a validated server wildcard (defense in depth).
+- **LOW 3:**
+  - after the wait ends, the report publishes "Gave up: the report key was not ready after 60 s" instead of "retrying (12/12)";
+  - the whole wait is one window (12 × the retry delay) with single synchronous attempts, so no inner `loadKeyringAsync` wait stretches it any more;
+  - concurrent triggers share one key wait, and the same report shares one waiter;
+  - managed-state publishing uses unique, exclusively created temp names (`randomBytes`, `wx`) and removes the temp file on failure, so concurrent publishes can't collide;
+  - a key directory whose parent is group/other-writable without the sticky bit is refused (sticky `1777` such as `/tmp` is allowed).
+- **Tests:**
+  - `gate-runtime`: five schema-invalid configs mounted through cordis (`ctx.plugin(<module>, rawConfig)`, the same `resolveConfig` DSH's loader runs) — the entry loads and the tool is refused; the permissive `Config`, `StrictConfig`, and a valid config still gating; the new wildcard rejections; generic prefixes never matching;
+  - `report-resume`: the "Gave up" state and the end-to-end window; concurrent triggers deduplicated with no temp files left;
+  - `managed-state`: 40 concurrent publishes;
+  - `state-store`: parent 0777 and 0770 refused, 1777 allowed.
+
 ### Security — LOW follow-ups on 8bbc07f (2026-10-13)
 
 - **`keyProtection.safeTools`:**

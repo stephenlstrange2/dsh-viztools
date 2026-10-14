@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import * as dshSession from '@deepseek-ai/dsh-session'
@@ -187,6 +187,21 @@ function tightenOwnDirectory(dir: string): string | undefined {
   return `tightened dsh-viztools key directory ${dir} from mode ${before} to 700`
 }
 
+/**
+ * Refuse a key directory whose PARENT is writable by group or others without the sticky bit:
+ * anyone with that access could rename our directory away and put their own key and anchors in
+ * its place. Sticky directories such as /tmp (1777) only let owners rename their entries.
+ */
+function assertParentNotReplaceable(dir: string): void {
+  if (process.platform === 'win32') return
+  const parent = dirname(dir)
+  if (parent === dir) return
+  const info = statSync(parent)
+  if ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0) {
+    throw new Error(`dsh-viztools key directory ${dir} sits in ${parent}, which is writable by group or others without the sticky bit (mode ${(info.mode & 0o7777).toString(8)}), so the key directory could be replaced. Move keyDir, or remove group/other write access from ${parent}`)
+  }
+}
+
 const KEY_HEX_LENGTH = 64
 
 /**
@@ -200,6 +215,7 @@ const KEY_HEX_LENGTH = 64
 export function loadKeyring(keyDir: string = defaultKeyDir()): Keyring {
   const dir = realPathish(keyDir)
   mkdirSync(dir, { recursive: true, mode: 0o700 })
+  assertParentNotReplaceable(dir)
   const notices: string[] = []
   const tightened = tightenOwnDirectory(dir)
   if (tightened !== undefined) notices.push(tightened)

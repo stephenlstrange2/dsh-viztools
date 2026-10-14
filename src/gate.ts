@@ -65,7 +65,7 @@ export const BUILTIN_SAFE_TOOLS = ['exit_plan_mode', 'propose_run_rules', 'todo_
 export const SANDBOXED_SUBPROCESS_TOOLS = ['bash', 'pwsh', 'run_code']
 
 /** DSH MCP server names (`dsh-mcp-client` serverName). */
-const MCP_SERVER = /^[A-Za-z0-9_-]{1,32}$/
+const SERVER_WILDCARD = /^mcp__([A-Za-z0-9_-]{1,32})__\*$/
 
 /**
  * Validate `keyProtection.safeTools`. Entries are trimmed; an empty entry, `*`, any pattern
@@ -75,15 +75,21 @@ const MCP_SERVER = /^[A-Za-z0-9_-]{1,32}$/
 export function resolveSafeTools(entries: readonly string[]): string[] {
   const out: string[] = []
   for (const raw of entries) {
+    if (typeof raw !== 'string') throw new Error(`keyProtection.safeTools entries must be strings, got ${JSON.stringify(raw)}`)
     const entry = raw.trim()
     if (entry === '' || entry === '*') throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} is empty or matches every tool`)
-    if (entry.endsWith('*')) {
-      const prefix = entry.slice(0, -1)
-      if (prefix.includes('*')) throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} may contain only one trailing *`)
-      if ('mcp__'.startsWith(prefix)) throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} would vouch for every MCP tool; name the server: mcp__<server>__*`)
-      if (prefix.startsWith('mcp__')) {
-        const server = prefix.endsWith('__') ? prefix.slice('mcp__'.length, -2) : undefined
-        if (server === undefined || !MCP_SERVER.test(server)) throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} must be exactly mcp__<server>__* (server names match [A-Za-z0-9_-]{1,32})`)
+    if (entry.includes('*')) {
+      // The ONLY wildcard form is one MCP server's tools. Generic prefixes (b*, r*, read*) would
+      // silently vouch for unrelated tools such as bash or read_mcp_resource.
+      const server = SERVER_WILDCARD.exec(entry)?.[1]
+      if (server !== undefined && (server.includes('__') || server.startsWith('_') || server.endsWith('_'))) {
+        // e.g. mcp__otx__evil__*: server "otx__evil" — but also server "otx"'s tool "evil__x".
+        throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} is ambiguous: server names with "__" or a leading/trailing "_" overlap other servers' tool names; list those tools by exact name`)
+      }
+      if (server === undefined) {
+        throw new Error('mcp__'.startsWith(entry.replace(/\*+$/, ''))
+          ? `keyProtection.safeTools entry ${JSON.stringify(raw)} would vouch for every MCP tool; name the server: mcp__<server>__*`
+          : `keyProtection.safeTools entry ${JSON.stringify(raw)} is not allowed: wildcards are only accepted as mcp__<server>__* (server names match [A-Za-z0-9_-]{1,32}); list other tools by exact name`)
       }
     }
     if (!out.includes(entry)) out.push(entry)
@@ -99,10 +105,10 @@ export function resolveSafeTools(entries: readonly string[]): string[] {
  * tools by exact name.
  */
 export function safePatternMatches(pattern: string, tool: string): boolean {
-  if (!pattern.endsWith('*')) return tool === pattern
+  if (!pattern.includes('*')) return tool === pattern
+  if (!SERVER_WILDCARD.test(pattern)) return false // only validated server wildcards ever match
   const prefix = pattern.slice(0, -1)
   if (!tool.startsWith(prefix)) return false
-  if (!prefix.startsWith('mcp__')) return true
   const rest = tool.slice(prefix.length)
   return rest.length > 0 && !rest.startsWith('_') && !rest.includes('__')
 }
@@ -141,7 +147,12 @@ export interface ResolvedConfig {
   keyDir: string
 }
 
-export const Config: z<Config, ResolvedConfig> = z.object({
+/**
+ * The real configuration schema. It is NOT given to cordis: a schema failure there throws before
+ * `apply`, the entry stays inactive, and DSH runs WITHOUT the gate (fail open). `apply` runs it
+ * itself and refuses every tool when it fails.
+ */
+export const StrictConfig: z<Config, ResolvedConfig> = z.object({
   planFirst: z.object({
     enabled: z.boolean().default(false),
     planningTools: z.array(String).default([]),
@@ -300,10 +311,11 @@ export interface GateTestHooks {
 }
 
 /** Install the durable plan-first and run-rules enforcement gate. */
-export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {}): void {
+export function apply(ctx: Context, input: unknown, hooks: GateTestHooks = {}): void {
   let config: ResolvedConfig
   try {
-    config = resolveGateConfig(input)
+    if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) throw new Error(`gate configuration must be an object, got ${Array.isArray(input) ? 'an array' : typeof input}`)
+    config = resolveGateConfig(StrictConfig((input ?? {}) as Config) as GateInput)
   } catch (error) {
     // Throwing would leave the entry un-activated and DSH running WITHOUT the gate (fail open).
     // Refuse every tool instead, with the reason, until the configuration is fixed.
@@ -765,5 +777,11 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
     publishStatus(gate)
   })
 }
+
+/**
+ * Permissive schema handed to cordis, so that any configuration value reaches `apply`, which
+ * validates it with {@link StrictConfig} and fails CLOSED.
+ */
+export const Config = z.any()
 
 apply.Config = Config
