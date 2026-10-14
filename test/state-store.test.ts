@@ -273,6 +273,33 @@ describe('follow-up hardening (e27dbcf PoCs)', () => {
     expect(() => loadKeyring(join(group, 'viztools'))).toThrow(/without the sticky bit/)
   })
 
+  it('checks the whole ancestor chain of keyDir, not only the direct parent (5a23e1d LOW 2)', async () => {
+    const { base } = await fixture()
+    const { chmod, mkdir } = await import('node:fs/promises')
+    // grand/parent/viztools: only the grandparent is open; the direct parent is private.
+    const grand = join(base, 'grand')
+    await mkdir(join(grand, 'parent'), { recursive: true })
+    await chmod(join(grand, 'parent'), 0o700)
+    await chmod(grand, 0o777)
+    expect(() => loadKeyring(join(grand, 'parent', 'viztools'))).toThrow(new RegExp(`sits under ${grand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}, which is writable by group or others without the sticky bit`))
+    await chmod(grand, 0o1777) // sticky ancestor (like /tmp) is fine
+    expect(() => loadKeyring(join(grand, 'parent', 'viztools'))).not.toThrow()
+    await chmod(grand, 0o775)
+    expect(() => loadKeyring(join(grand, 'parent', 'viztools'))).toThrow(/without the sticky bit/)
+    await chmod(grand, 0o755)
+    expect(() => loadKeyring(join(grand, 'parent', 'viztools'))).not.toThrow()
+  })
+
+  it('resolves symlinked ancestors before checking them', async () => {
+    const { base } = await fixture()
+    const { chmod, mkdir, symlink } = await import('node:fs/promises')
+    const real = join(base, 'real-open')
+    await mkdir(join(real, 'p'), { recursive: true })
+    await chmod(real, 0o777)
+    await symlink(real, join(base, 'alias'))
+    expect(() => loadKeyring(join(base, 'alias', 'p', 'viztools'))).toThrow(/real-open, which is writable/)
+  })
+
   it('compares the key directory with the workspace by realpath', async () => {
     const { base } = await fixture()
     const { mkdir, symlink } = await import('node:fs/promises')

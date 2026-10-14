@@ -18,6 +18,7 @@ const ok = (name: string, body: () => unknown = () => ({ ok: true })) => defineT
 })
 
 interface Harness {
+  questions: { id: string; header?: string; question?: string; detail?: string }[]
   ctx: Context
   root: string
   agent: (id: string, session?: Session) => Promise<{ id: string; session: Session; ctx: Context }>
@@ -30,7 +31,8 @@ async function harness(config: GateInput, options: { planMode?: boolean; tools?:
   const ctx = new Context()
   await ctx.plugin(SystemPrompt, {} as never).await()
   await ctx.plugin(ToolRuntime).await()
-  ctx.provide('userQuestions', { ask: async (request: { questions: { id: string }[] }) => ({ answers: request.questions.map((q) => ({ id: q.id, selected: ['Approve'] })) }) } as never)
+  const questions: { id: string; header?: string; question?: string; detail?: string }[] = []
+  ctx.provide('userQuestions', { ask: async (request: { questions: { id: string; header?: string; question?: string; detail?: string }[] }) => { questions.push(...request.questions); return { answers: request.questions.map((q) => ({ id: q.id, selected: ['Approve'] })) } } } as never)
   if (options.planMode !== false) ctx.provide('planMode', { set: () => 'committed' } as never)
   if (options.sandboxPolicy !== undefined) ctx.provide('sandboxPolicy', options.sandboxPolicy as never)
   if (options.confinedReads === true) {
@@ -47,7 +49,7 @@ async function harness(config: GateInput, options: { planMode?: boolean; tools?:
   const effective = { keyProtection: { safeTools: [...fixtureSafe, 'subagent', 'replay', 'diff', 'bench_status'] }, ...config }
   await ctx.plugin({ name: 'gate', inject: gate.inject, apply: (inner: Context, cfg: GateInput) => gate.apply(inner, cfg, { pluginRecords: options.pluginRecords ?? null }) } as never, { cwd: root, ...effective } as never).await()
   return {
-    ctx, root, ran,
+    questions, ctx, root, ran,
     async agent(id, session = Session.create(id as never)) {
       // Thin per-agent context: guards/listeners go to the shared runtime, prompt sections are per agent.
       const agentCtx = {
@@ -272,6 +274,41 @@ describe('schema-invalid gate configuration fails closed through the real cordis
       expect(mounted.ran).toEqual([])
     })
   }
+
+  // 5a23e1d MEDIUM 1: a mounted gate that enforces nothing must not run open silently.
+  for (const [label, rawConfig] of [
+    ['typo "planfirst"', { planfirst: { enabled: true, planningTools: [] }, runRules: { enabled: true, allowedTools: ['replay'], maxLimits: {} }, keyProtection: { safeTools: ['replay'] } }],
+    ['typo "enable"', { planFirst: { enable: true }, runRules: { enabled: true, allowedTools: ['replay'], maxLimits: {} }, keyProtection: { safeTools: ['replay'] } }],
+    ['typo "runrules"', { runrules: { enabled: true, allowedTools: ['replay'] } }],
+    ['typo in a nested key', { ...valid, keyProtection: { safeTool: ['replay'] } }],
+    ['empty object', {}],
+    ['both features off', { planFirst: { enabled: false }, runRules: { enabled: false } }],
+    ['disabled: true contradicting enabled features', { ...valid, disabled: true }],
+  ] as const) {
+    it(`${label} → every tool is refused with the reason`, async () => {
+      const mounted = await mount(rawConfig as Record<string, unknown>)
+      expect(mounted.loadError).toBeUndefined()
+      expect(mounted.text).toMatch(/gate configuration is invalid .*(unknown gate configuration key|enforce nothing|contradicts|no configuration)/)
+      expect(mounted.ran).toEqual([])
+    })
+  }
+
+  it('suggests the intended key for a typo', async () => {
+    const { resolveRawGateConfig } = await import('../src/gate.js')
+    expect(() => resolveRawGateConfig({ planfirst: {} })).toThrow(/unknown gate configuration key "planfirst" \(did you mean "planFirst"\?\)/)
+    expect(() => resolveRawGateConfig({ planFirst: { enable: true } })).toThrow(/"planFirst.enable" \(did you mean "planFirst.enabled"\?\)/)
+    expect(() => resolveRawGateConfig(null)).toThrow(/no configuration/)
+    expect(() => resolveRawGateConfig(undefined)).toThrow(/no configuration/)
+    // Free-form tool names under maxLimits are not "unknown keys".
+    expect(resolveRawGateConfig({ runRules: { enabled: true, allowedTools: ['mcp__otx__replay_tx_only'], maxLimits: { mcp__otx__replay_tx_only: 2 } } }).runRules.maxLimits).toEqual({ mcp__otx__replay_tx_only: 2 })
+  })
+
+  it('only an explicit disabled: true mounts the gate inert', async () => {
+    const mounted = await mount({ disabled: true })
+    expect(mounted.loadError).toBeUndefined()
+    expect(mounted.result.isError).toBe(false)
+    expect(mounted.ran).toEqual(['replay'])
+  })
 
   it('the exported Config accepts anything, while StrictConfig still validates', async () => {
     expect(gate.Config['~standard'].validate({ planFirst: { enabled: 'yes' } })).not.toHaveProperty('issues')
@@ -556,6 +593,60 @@ describe('malformed gate state denies everything without breaking agent creation
     await mkdir(join(h.root, '.dsh/viztools/state', 'x2.gate.jsonl'), { recursive: true })
     const agent = await h.agent('x2')
     expect((await h.call(agent, 'bench_status', 'b')).text).toMatch(/could not be read.*Every tool is refused/)
+  })
+})
+
+describe('rules that deny every tool need explicit confirmation (5a23e1d UX 3)', () => {
+  const config: GateInput = { planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['replay', 'diff'], maxLimits: { replay: 2 } } }
+  const propose = (h: Harness, agent: Awaited<ReturnType<Harness['agent']>>, callId: string, args: Record<string, unknown>) =>
+    h.ctx.tools.execute({ callId: callId as never, name: 'propose_run_rules', arguments: { deny: [], limits: {}, notes: [], ...args }, agent: agent as never, signal: new AbortController().signal })
+  const text = (result: { content: unknown[] }) => result.content.map((block) => (block as { text?: string }).text ?? '').join('')
+
+  it('rejects allow: [] without confirmDenyAll, before asking the user', async () => {
+    const h = await harness(config)
+    const agent = await h.agent('ea1')
+    const result = await propose(h, agent, 'p1', { allow: [] })
+    expect(result.isError).toBe(true)
+    expect(text(result)).toMatch(/would deny EVERY governed tool for the rest of the session.*its allow list is empty.*confirmDenyAll: true/)
+    expect(h.questions).toEqual([])
+    expect((await h.call(agent, 'diff', 'd')).isError).toBe(false) // nothing was approved
+  })
+
+  it('with confirmDenyAll the review warns clearly, and approval then denies every tool', async () => {
+    const h = await harness(config)
+    const agent = await h.agent('ea2')
+    expect((await propose(h, agent, 'p2', { allow: [], confirmDenyAll: true })).isError).toBe(false)
+    const review = h.questions.at(-1)
+    expect(review?.header).toMatch(/DENIES EVERY TOOL/)
+    expect(review?.question).toMatch(/deny every tool for the rest of the session and cannot be widened/)
+    expect(review?.detail).toMatch(/^WARNING: after approval no governed tool can run again/)
+    expect(review?.detail).toMatch(/Tools still allowed: none/)
+    expect((await h.call(agent, 'diff', 'd')).text).toMatch(/Approved run rules deny tool diff/)
+    // And nothing can widen it again.
+    expect((await propose(h, agent, 'p3', { allow: ['diff', 'replay'], confirmDenyAll: true })).isError).toBe(false)
+    expect((await h.call(agent, 'diff', 'd2')).text).toMatch(/Approved run rules deny tool diff/)
+  })
+
+  it('also catches deny-all reached by merging (disjoint allow lists) or by a deny list covering everything', async () => {
+    const h = await harness(config)
+    const agent = await h.agent('ea3')
+    expect((await propose(h, agent, 'p1', { allow: ['replay'] })).isError).toBe(false)
+    const disjoint = await propose(h, agent, 'p2', { allow: ['diff'] })
+    expect(text(disjoint)).toMatch(/no tool in common with the rules already approved/)
+    const covering = await propose(h, agent, 'p3', { deny: ['replay'] })
+    expect(text(covering)).toMatch(/deny list covers every tool that is still allowed/)
+    expect((await h.call(agent, 'replay', 'r')).isError).toBe(false) // neither was approved
+  })
+
+  it('normal narrowing shows the effective merged rules and what is still allowed', async () => {
+    const h = await harness(config)
+    const agent = await h.agent('ea4')
+    await propose(h, agent, 'p1', { allow: ['replay', 'diff'] })
+    await propose(h, agent, 'p2', { deny: ['diff'] })
+    const review = h.questions.at(-1)
+    expect(review?.header).toBe('Run rules review')
+    expect(review?.detail).toMatch(/Effective after merging with the rules already approved/)
+    expect(review?.detail).toMatch(/Tools still allowed: replay$/)
   })
 })
 

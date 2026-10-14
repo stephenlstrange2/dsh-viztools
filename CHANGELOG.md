@@ -4,6 +4,21 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — follow-ups on 5a23e1d (2026-10-14, PoCs in /tmp/vzr6 reproduced)
+
+- **MEDIUM 1: a mounted gate never runs open silently.**
+  - Unknown keys are now rejected with a "did you mean" hint, so typos (`planfirst`, `enable`, `runrules`, nested `safeTool`) no longer pass through. `runRules.maxLimits` keys stay free-form tool names.
+  - A null/undefined/`{}` config, or one with both `planFirst` and `runRules` disabled, refuses every tool with the reason.
+  - The new `disabled: true` is the only way to mount the gate inert, and it is an error together with an enabled feature.
+- **LOW 2:** every ancestor of `keyDir`, up to `/`, must not be group/other-writable unless sticky, and must be owned by you or root (resolved by realpath, so symlinked ancestors are checked).
+- **UX 3:** `propose_run_rules` refuses a proposal whose *effective* result allows no governed tool, unless called with the new `confirmDenyAll: true`. This covers an empty `allow`, an allowlist disjoint from earlier approvals, and a deny list covering everything. The user isn't asked at all in that case. With confirmation, the review header says "DENIES EVERY TOOL" and the question and detail warn that it cannot be widened. Every review now shows the effective merged rules and the tools still allowed.
+- **Migration:** a gate entry that enabled nothing used to be inert silently; it now needs `disabled: true`.
+- **Tests:**
+  - `gate-runtime`, through cordis: seven configs that refuse (four typos, `{}`, both off, a contradicting `disabled`), the typo hints, null/undefined, free-form `maxLimits`, and `disabled: true` being inert;
+  - the `confirmDenyAll` flows (refusal before asking, the warning, disjoint and covering cases, the merged view);
+  - `state-store`: an open grandparent (0777, 0775) refused, sticky and 0755 allowed, a symlinked open ancestor refused;
+  - `entries`: the inert mount now uses `disabled: true`.
+
 ### Security — follow-ups on 3526c45 (2026-10-14, PoCs in /tmp/vzr5 reproduced)
 
 - **HIGH 1: schema-invalid gate config no longer fails open.** cordis validated `apply.Config` before `apply`, so `planFirst.enabled: "yes"`, `safeTools: "x"`, or `maxLimits: { replay: "two" }` threw a `ValidationError`, left the entry inactive, and let every tool run ungated. The exported `Config` is now `z.any()`; the real schema (`StrictConfig`) runs inside `apply`, and any failure (schema or semantic) refuses every tool with the reason. A non-object config is also refused. Side effect: `dsh --dump-config-schema` no longer lists the gate's fields.

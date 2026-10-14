@@ -188,17 +188,23 @@ function tightenOwnDirectory(dir: string): string | undefined {
 }
 
 /**
- * Refuse a key directory whose PARENT is writable by group or others without the sticky bit:
- * anyone with that access could rename our directory away and put their own key and anchors in
- * its place. Sticky directories such as /tmp (1777) only let owners rename their entries.
+ * Refuse a key directory if ANY ancestor (up to /) lets someone else replace the path to it:
+ * an ancestor that is group/other-writable without the sticky bit, or one owned by another
+ * user (other than root), could have an entry renamed away and swapped for an attacker's key
+ * and anchors. Sticky directories such as /tmp (1777) only let owners rename their entries.
+ * `dir` is already a realpath, so symlinked ancestors are resolved.
  */
 function assertParentNotReplaceable(dir: string): void {
   if (process.platform === 'win32') return
-  const parent = dirname(dir)
-  if (parent === dir) return
-  const info = statSync(parent)
-  if ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0) {
-    throw new Error(`dsh-viztools key directory ${dir} sits in ${parent}, which is writable by group or others without the sticky bit (mode ${(info.mode & 0o7777).toString(8)}), so the key directory could be replaced. Move keyDir, or remove group/other write access from ${parent}`)
+  const uid = process.getuid?.()
+  for (let child = dir, ancestor = dirname(dir); ancestor !== child; child = ancestor, ancestor = dirname(ancestor)) {
+    const info = statSync(ancestor)
+    if ((info.mode & 0o022) !== 0 && (info.mode & 0o1000) === 0) {
+      throw new Error(`dsh-viztools key directory ${dir} sits under ${ancestor}, which is writable by group or others without the sticky bit (mode ${(info.mode & 0o7777).toString(8)}), so the path to the key could be replaced. Move keyDir, or remove group/other write access from ${ancestor}`)
+    }
+    if (uid !== undefined && info.uid !== uid && info.uid !== 0) {
+      throw new Error(`dsh-viztools key directory ${dir} sits under ${ancestor}, which is owned by uid ${info.uid} (not you or root), so the path to the key could be replaced. Move keyDir`)
+    }
   }
 }
 

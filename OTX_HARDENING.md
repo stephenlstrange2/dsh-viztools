@@ -62,10 +62,16 @@ Status: **automated blockers closed; internal acceptance pending** (see `SECURIT
 2. **MEDIUM:** `safeTools` wildcards are only `mcp__<server>__*` with an unambiguous server. Tests: `gate-runtime`.
 3. **LOW:** "Gave up" state, one end-to-end retry window, deduplicated waiters, race-safe state publishing, and refusal of a replaceable key-dir parent. Tests: `report-resume`, `managed-state`, `state-store`.
 
+## Follow-ups on 5a23e1d (2026-10-14)
+
+1. **MEDIUM:** unknown config keys are rejected, and a gate that enables nothing refuses every tool unless `disabled: true` is set. Tests: `gate-runtime` (through cordis), `entries`.
+2. **LOW:** the whole `keyDir` ancestor chain is checked (no non-sticky group/other-writable or foreign-owned ancestor). Tests: `state-store`.
+3. **UX:** deny-all rule proposals need `confirmDenyAll: true` and get a clear warning in the review. Tests: `gate-runtime`.
+
 ## Evidence
 
 ```text
-pnpm check:            176 TypeScript tests, 34 Python tests passed
+pnpm check:            191 TypeScript tests, 34 Python tests passed
 pnpm test:integration: 53/53 checks passed (Chromium + Firefox; restart, resume, repair, live-lease refusal)
 ```
 

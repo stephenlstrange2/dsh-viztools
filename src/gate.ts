@@ -10,7 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { decideTool, DELEGATION_TOOLS, expandPatterns, RUN_CODE, type GateDenial } from './gate-policy.js'
 import { applyGateRecord, evaluateTrust, foldGateRecords, type GateFold, type GateRecordKind } from './gate-state.js'
 import { isSafeSessionId } from './managed-state.js'
-import { deploymentFingerprint, rulesValidForDeployment, RUN_RULES_VERSION, type RunRules } from './run-rules.js'
+import { deploymentFingerprint, mergeRules, rulesValidForDeployment, RUN_RULES_VERSION, type RunRules } from './run-rules.js'
 import { assertKeyDirOutside, defaultKeyDir, KeyNotReadyError, loadKeyring, loadKeyringAsync, openStateStore, type JsonValue, type Keyring, type PluginRecordApi, type StateStore } from './state-store.js'
 
 export { GATE_EVENT_TYPE, decodeGateChange, foldGate, initialGateState } from './gate-domain.js'
@@ -114,6 +114,8 @@ export function safePatternMatches(pattern: string, tool: string): boolean {
 }
 
 export interface Config {
+  /** Explicitly mount the gate inert. Without it, a gate with nothing enabled refuses every tool. */
+  disabled?: boolean
   planFirst?: PlanFirstConfig
   runRules?: RunRulesConfig
   delegation?: DelegationConfig
@@ -124,6 +126,7 @@ export interface Config {
 }
 
 export interface ResolvedConfig {
+  disabled: boolean
   planFirst: {
     enabled: boolean
     planningTools: string[]
@@ -153,6 +156,7 @@ export interface ResolvedConfig {
  * itself and refuses every tool when it fails.
  */
 export const StrictConfig: z<Config, ResolvedConfig> = z.object({
+  disabled: z.boolean().default(false),
   planFirst: z.object({
     enabled: z.boolean().default(false),
     planningTools: z.array(String).default([]),
@@ -202,8 +206,55 @@ interface PlanModeLike {
 /** Resolved config, or a partial one (missing keys take their defaults). */
 export type GateInput = { readonly [K in keyof ResolvedConfig]?: ResolvedConfig[K] extends object ? Partial<ResolvedConfig[K]> : ResolvedConfig[K] }
 
+/** Every key the gate understands; `'*'` = free-form keys (tool names in maxLimits). */
+type KeyTree = { readonly [key: string]: true | '*' | KeyTree }
+const KNOWN_KEYS: KeyTree = {
+  disabled: true,
+  planFirst: { enabled: true, planningTools: true, denialMessage: true, allowPtcTransport: true },
+  runRules: { enabled: true, allowedTools: true, maxLimits: '*' },
+  delegation: { allow: true },
+  keyProtection: { fileReadingTools: true, safeTools: true },
+  cwd: true,
+  stateDir: true,
+  keyDir: true,
+}
+
+/**
+ * Reject keys the gate does not know (schemastery keeps them silently), so a typo such as
+ * `planfirst`, `enable`, or `runrules` cannot leave a feature disabled without anyone noticing.
+ */
+export function assertKnownKeys(value: unknown, tree: KeyTree = KNOWN_KEYS, path = ''): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return
+  for (const [key, child] of Object.entries(value)) {
+    const known = tree[key]
+    const at = path === '' ? key : `${path}.${key}`
+    if (known === undefined) {
+      const hint = Object.keys(tree).find((candidate) => candidate.toLowerCase() === key.toLowerCase() || candidate.toLowerCase().startsWith(key.toLowerCase()) || key.toLowerCase().startsWith(candidate.toLowerCase()))
+      throw new Error(`unknown gate configuration key "${at}"${hint === undefined ? '' : ` (did you mean "${path === '' ? hint : `${path}.${hint}`}"?)`}`)
+    }
+    if (typeof known === 'object') assertKnownKeys(child, known, at)
+  }
+}
+
+/**
+ * Validate a raw entry config: no unknown keys, the strict schema, then the semantic checks.
+ * A config that enables nothing must say so with `disabled: true`; otherwise it is an error,
+ * because a mounted gate that silently does nothing looks exactly like a working one.
+ */
+export function resolveRawGateConfig(input: unknown): ResolvedConfig {
+  if (input === undefined || input === null) throw new Error('the gate has no configuration; enable planFirst and/or runRules, or set disabled: true to mount it inert')
+  if (typeof input !== 'object' || Array.isArray(input)) throw new Error(`gate configuration must be an object, got ${Array.isArray(input) ? 'an array' : typeof input}`)
+  assertKnownKeys(input)
+  const config = resolveGateConfig(StrictConfig(input as Config) as GateInput)
+  const enabled = config.planFirst.enabled || config.runRules.enabled
+  if (config.disabled && enabled) throw new Error('disabled: true contradicts planFirst.enabled / runRules.enabled; remove one of them')
+  if (!config.disabled && !enabled) throw new Error('neither planFirst.enabled nor runRules.enabled is true, so the gate would enforce nothing; enable a feature, or set disabled: true to mount it inert')
+  return config
+}
+
 function partial(config: GateInput): ResolvedConfig {
   return {
+    disabled: config.disabled ?? false,
     planFirst: { enabled: false, planningTools: [], denialMessage: 'Plan not approved yet.', allowPtcTransport: false, ...config.planFirst },
     runRules: { enabled: false, allowedTools: [], maxLimits: {}, ...config.runRules },
     delegation: { allow: false, ...config.delegation },
@@ -314,8 +365,7 @@ export interface GateTestHooks {
 export function apply(ctx: Context, input: unknown, hooks: GateTestHooks = {}): void {
   let config: ResolvedConfig
   try {
-    if (input !== undefined && input !== null && (typeof input !== 'object' || Array.isArray(input))) throw new Error(`gate configuration must be an object, got ${Array.isArray(input) ? 'an array' : typeof input}`)
-    config = resolveGateConfig(StrictConfig((input ?? {}) as Config) as GateInput)
+    config = resolveRawGateConfig(input)
   } catch (error) {
     // Throwing would leave the entry un-activated and DSH running WITHOUT the gate (fail open).
     // Refuse every tool instead, with the reason, until the configuration is fixed.
@@ -327,7 +377,8 @@ export function apply(ctx: Context, input: unknown, hooks: GateTestHooks = {}): 
     })
     return
   }
-  if (!config.planFirst.enabled && !config.runRules.enabled) return
+  // Only an explicit `disabled: true` mounts the gate inert (resolveRawGateConfig enforces it).
+  if (config.disabled) return
 
   const workspace = resolve(config.cwd || process.cwd())
   const stateRoot = resolve(workspace, config.stateDir)
@@ -587,9 +638,10 @@ export function apply(ctx: Context, input: unknown, hooks: GateTestHooks = {}): 
   if (config.runRules.enabled) {
     ctx.tools.register(defineTool({
       name: PROPOSE_RUN_RULES,
-      description: 'Propose narrowing run rules for user approval. Omit `allow` to keep the deployment allowed set; an empty `allow` list denies every governed tool. Rules can never enable tools outside the deployment allowed set or exceed deployment limits.',
+      description: 'Propose narrowing run rules for user approval. Omit `allow` to keep the deployment allowed set. Rules only ever narrow: they can never enable tools outside the deployment allowed set, exceed deployment limits, or be widened later in this session. A proposal that leaves NO governed tool allowed (an empty `allow`, an allowlist disjoint from earlier approvals, or a deny list covering everything) is refused unless `confirmDenyAll` is true, because it ends all tool use for the rest of the session.',
       parameters: {
         allow: { type: 'array', items: { type: 'string' } },
+        confirmDenyAll: { type: 'boolean', description: 'Set only when you intend these rules to deny every governed tool for the rest of the session (cannot be undone).' },
         deny: { type: 'array', items: { type: 'string' }, required: true },
         limits: { type: 'object', additionalProperties: true, required: true },
         notes: { type: 'array', items: { type: 'string' }, required: true },
@@ -609,12 +661,25 @@ export function apply(ctx: Context, input: unknown, hooks: GateTestHooks = {}): 
         const proposed: RunRules = { version: RUN_RULES_VERSION, ...(args.allow === undefined ? {} : { allow: args.allow }), deny: args.deny, limits, notes: args.notes, deploymentFingerprint: fingerprint }
         // The agent's own view: preset-scoped MCP tools are invisible in the global view.
         const rules = validateRules(proposed, config.runRules, agent.ctx.tools.schemas(agent).map((schema) => schema.name))
+        // Judge what the session will actually be left with: approvals merge (narrow only).
+        const current = gates.get(agent) ?? open(agent)
+        const effective = current.fold.rules === undefined || current.fold.rulesInvalid !== undefined ? rules : mergeRules(current.fold.rules, rules)
+        const stillAllowed = (effective.allow ?? config.runRules.allowedTools).filter((tool) => !effective.deny.includes(tool) && !controlTools.has(tool))
+        const denyAll = stillAllowed.length === 0
+        if (denyAll && args.confirmDenyAll !== true) {
+          const why = rules.allow !== undefined && rules.allow.length === 0 ? 'its allow list is empty'
+            : effective.allow !== undefined && effective.allow.length === 0 ? 'its allow list has no tool in common with the rules already approved'
+            : 'its deny list covers every tool that is still allowed'
+          throw new Error(`This proposal would deny EVERY governed tool for the rest of the session, and approved rules can never be widened again (${why}). If that is really intended, call propose_run_rules again with confirmDenyAll: true; otherwise omit allow to keep the deployment allowed set, or list the tools to keep.`)
+        }
         const answer = await ctx.userQuestions.ask({
           questions: [{
             id: 'run-rules-review',
-            header: 'Run rules review',
-            question: 'Approve these narrowing run rules?',
-            detail: JSON.stringify(rules, null, 2),
+            header: denyAll ? 'Run rules review — DENIES EVERY TOOL' : 'Run rules review',
+            question: denyAll
+              ? 'WARNING: these rules deny every tool for the rest of the session and cannot be widened later. Approve anyway?'
+              : 'Approve these narrowing run rules?',
+            detail: `${denyAll ? 'WARNING: after approval no governed tool can run again in this session, and no later approval can widen the rules.\n\n' : ''}Proposed:\n${JSON.stringify(rules, null, 2)}${effective === rules ? '' : `\n\nEffective after merging with the rules already approved:\n${JSON.stringify(effective, null, 2)}`}\n\nTools still allowed: ${stillAllowed.length === 0 ? 'none' : stillAllowed.join(', ')}`,
             options: [{ label: 'Approve' }, { label: 'Reject' }],
           }],
           agent,
@@ -622,7 +687,7 @@ export function apply(ctx: Context, input: unknown, hooks: GateTestHooks = {}): 
         })
         const item = answer.answers.find((entry) => entry.id === 'run-rules-review')
         if (item?.selected.length !== 1 || item.selected[0] !== 'Approve' || item.custom !== undefined) throw new Error('The user rejected the proposed run rules.')
-        const gate = gates.get(agent) ?? open(agent)
+        const gate = current
         if (!record(gate, 'rules-approved', { callId: String(exec.callId), rules: rules as unknown as JsonValue })) throw new Error('The approved run rules could not be stored durably; they apply to this live session only.')
         publishStatus(gate)
         return { approved: true }
