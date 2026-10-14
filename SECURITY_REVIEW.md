@@ -10,7 +10,7 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 
 ## Automated evidence (2026-10-13)
 
-`pnpm check`: 158 TypeScript tests and 34 Python tests pass. `pnpm test:integration` (real DSH 0.2.0-rc.2 web, OTX topology, mock LLM, late-registering MCP fixture, headless Chromium at 1910×916 and Firefox, restart + resume + repair + live-lease refusal): **53/53 checks pass**.
+`pnpm check`: 165 TypeScript tests and 34 Python tests pass. `pnpm test:integration` (real DSH 0.2.0-rc.2 web, OTX topology, mock LLM, late-registering MCP fixture, headless Chromium at 1910×916 and Firefox, restart + resume + repair + live-lease refusal): **53/53 checks pass**.
 
 ### Durable state and restart
 
@@ -21,6 +21,7 @@ History: the 2026-10-12 real-console review overturned an earlier "hardening com
 - [x] Forks honour inherited approval and counts through recursive lineage (grandchildren included).
 - [x] Records are bound to their session and channel; a grafted donor record fails. The anchor head is compared on every read, including after a reset, so truncating a post-reset narrowing rule fails closed. At most one record may lie beyond the anchor. *(Gaps in e27dbcf; corrected.)*
 - [x] Same-session replay is rejected: indices strictly increase across the file, resets are accepted only at the next index, and the anchored head must be the last record (or second-to-last for the one-record crash window). *(804fbef gap; corrected.)*
+- [x] `safeTools` is validated (no `*`, `""`, all-MCP, or partial-server patterns), and `mcp__<server>__*` is scoped to exactly that server. An invalid gate configuration refuses every tool (no fail-open). A group- or world-writable key directory is refused; anchors must be our own regular files.
 - [x] **Key readability:** the sidecar is tamper-evident only against agents that cannot read `$DSH_HOME`. Readers are deny-by-default: every allowed tool not listed in `keyProtection.safeTools` (or built in: control tools and `todo_write`) is a reader, and every tool is refused while one is allowed. A DSH-sandbox probe can clear only `bash`, `pwsh`, and `run_code`; in-process readers, `read_mcp_resource`, and MCP tools are never cleared by it.
 - [x] An unusable `keyDir` (inside the workspace by realpath, not owner-only, or a creation failure) denies all tools with a notice. Key creation is race-safe.
 - [x] A malformed but authentic record, or unreadable state, denies every tool with a notice; agent creation never crashes.

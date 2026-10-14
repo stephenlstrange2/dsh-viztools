@@ -223,6 +223,41 @@ describe('follow-up hardening (e27dbcf PoCs)', () => {
     expect(() => loadKeyring(dir)).toThrow(/key may have leaked\. Rotate it: stop the console, delete .*sidecar\.key and .*anchors/)
   })
 
+  it('refuses a group/other-WRITABLE key directory instead of silently tightening it (8bbc07f LOW 2)', async () => {
+    const { base } = await fixture()
+    const { chmod, stat: statFile } = await import('node:fs/promises')
+    for (const mode of [0o775, 0o777, 0o730]) {
+      const dir = join(base, `writable-${mode.toString(8)}`, 'viztools')
+      loadKeyring(dir)
+      await chmod(dir, mode)
+      expect(() => loadKeyring(dir)).toThrow(/writable by group or others .*not tightened automatically/)
+      expect((await statFile(dir)).mode & 0o777).toBe(mode)
+    }
+    // Read-only exposure (0755) is still tightened, as before.
+    const readable = join(base, 'readable', 'viztools')
+    loadKeyring(readable)
+    await chmod(readable, 0o755)
+    expect(loadKeyring(readable).notices?.[0]).toMatch(/from mode 755 to 700/)
+  })
+
+  it('does not trust a linked or group/other-writable anchor file', async () => {
+    const { root, keyring, base } = await fixture()
+    const { chmod, rename, symlink } = await import('node:fs/promises')
+    const store = createSidecarStore(root, session('an1'), 'gate', keyring)
+    store.append('a', {})
+    const anchor = join(keyring.dir, 'anchors', 'an1.gate.json')
+    await chmod(anchor, 0o666)
+    expect(readAnchor(keyring, 'an1', 'gate')).toBe('invalid')
+    expect(createSidecarStore(root, session('an1'), 'gate', keyring).read().integrity).toMatchObject({ status: 'truncated', reason: expect.stringMatching(/anchor fails authentication/) })
+    await chmod(anchor, 0o600)
+    expect(readAnchor(keyring, 'an1', 'gate')).toMatchObject({ last: 0 })
+    // A symlink to an otherwise valid anchor (e.g. planted from elsewhere) is not trusted either.
+    const elsewhere = join(base, 'elsewhere.json')
+    await rename(anchor, elsewhere)
+    await symlink(elsewhere, anchor)
+    expect(readAnchor(keyring, 'an1', 'gate')).toBe('invalid')
+  })
+
   it('compares the key directory with the workspace by realpath', async () => {
     const { base } = await fixture()
     const { mkdir, symlink } = await import('node:fs/promises')

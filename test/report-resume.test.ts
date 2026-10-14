@@ -67,4 +67,36 @@ describe('report state across resume', () => {
     await settle()
     expect(JSON.parse(await readFile(managedStatePath(join(cwd, '.dsh/reports'), 'keyless'), 'utf8')).status).toBe('pending')
   })
+
+  it('retries a report whose key is still being written instead of disabling reports (8bbc07f LOW 3)', async () => {
+    const { mkdir, writeFile } = await import('node:fs/promises')
+    const cwd = await mkdtemp(join(tmpdir(), 'viztools-resume-'))
+    const keyDir = join(await mkdtemp(join(tmpdir(), 'viztools-keys-')), 'k')
+    await mkdir(keyDir, { mode: 0o700 })
+    await writeFile(join(keyDir, 'sidecar.key'), '', { mode: 0o600 }) // another process is still writing it
+    const ctx = new Context()
+    ctx.provide('sessionPersistence', { flush: async () => undefined } as never)
+    const config = report.Config({ enabled: true, cwd, outputDir: '.dsh/reports', triggerOnTurnStop: true, keyDir })
+    await ctx.plugin({ name: 'report-hooked', inject: report.inject, apply: (inner: Context) => report.apply(inner, config, { keyRetryDelayMs: 100 }) } as never, {} as never).await()
+    const agent = { id: 'kr1', session: Session.create('kr1' as never), ctx }
+    ;(ctx as unknown as { emit: (...args: unknown[]) => void }).emit('agent/turn-stopping', { agent, turn: 1 })
+    const statePath = managedStatePath(join(cwd, '.dsh/reports'), 'kr1')
+    let state: { status: string; reason?: string } | undefined
+    for (let i = 0; i < 80 && !/not ready yet/.test(state?.reason ?? ''); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      state = JSON.parse(await readFile(statePath, 'utf8').catch(() => '{}'))
+    }
+    expect(state?.reason).toMatch(/Report key is not ready yet; retrying/)
+    // The key arrives; the very same report is retried and now records its outcome durably.
+    await writeFile(join(keyDir, 'sidecar.key'), 'd'.repeat(64))
+    const sidecar = join(cwd, '.dsh/viztools/state', 'kr1.report.jsonl')
+    let records = ''
+    for (let i = 0; i < 80 && records === ''; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      records = await readFile(sidecar, 'utf8').catch(() => '')
+    }
+    expect(records).toMatch(/"kind":"failed"/) // no real marimo here: the export fails, but the outcome is stored
+    state = JSON.parse(await readFile(statePath, 'utf8'))
+    expect(state?.reason ?? '').not.toMatch(/key/)
+  }, 20_000)
 })

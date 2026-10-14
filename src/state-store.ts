@@ -167,15 +167,21 @@ export function assertPrivate(path: string, kind: 'directory' | 'file'): void {
 }
 
 /**
- * Tighten a key directory that we own but that is group/other-accessible (for example created
- * by an earlier version or under a permissive umask). The key FILE was always created 0600,
- * so a 0755 directory never exposed it; directories owned by someone else are refused.
+ * Tighten a key directory that we own but that is group/other-READABLE (for example 0755 from
+ * an earlier version or a permissive umask): the key FILE was always created 0600, so reading
+ * the directory never exposed it. A directory that is group/other-WRITABLE (0775, 0777, ...)
+ * is refused instead: another user could have replaced the key or the anchors, so silently
+ * tightening it would bless state we cannot trust. Directories owned by someone else are
+ * refused by {@link assertPrivate}.
  */
 function tightenOwnDirectory(dir: string): string | undefined {
   if (process.platform === 'win32') return undefined
   const info = lstatSync(dir)
   const uid = process.getuid?.()
   if (!info.isDirectory() || info.isSymbolicLink() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o077) === 0) return undefined
+  if ((info.mode & 0o022) !== 0) {
+    throw new Error(`dsh-viztools key directory ${dir} is writable by group or others (mode ${(info.mode & 0o777).toString(8)}), so its key and anchors may have been replaced. It is not tightened automatically: inspect it, then either fix it with \`chmod 700 ${dir}\` if you trust its contents, or rotate (delete ${join(dir, 'sidecar.key')} and ${join(dir, 'anchors')}; existing gated sessions then fail closed and need re-approval)`)
+  }
   const before = (info.mode & 0o777).toString(8)
   chmodSync(dir, 0o700)
   return `tightened dsh-viztools key directory ${dir} from mode ${before} to 700`
@@ -397,6 +403,9 @@ export function readAnchor(keyring: Keyring, sessionId: string, channel: StoreCh
   const path = anchorPath(keyring, sessionId, channel)
   if (!existsSync(path)) return undefined
   try {
+    // The anchor must be our own regular file (and its directory ours and not group/other
+    // writable): a foreign-owned or linked anchor is not trusted, whatever its MAC says.
+    if (!anchorTrusted(path)) return 'invalid'
     const value = JSON.parse(readFileSync(path, 'utf8')) as Anchor & { mac?: unknown }
     if (value.session !== sessionId || value.channel !== channel || typeof value.mac !== 'string' || !Number.isSafeInteger(value.last) || typeof value.head !== 'string') return 'invalid'
     const { mac, ...anchor } = value
@@ -404,6 +413,16 @@ export function readAnchor(keyring: Keyring, sessionId: string, channel: StoreCh
   } catch {
     return 'invalid'
   }
+}
+
+function anchorTrusted(path: string): boolean {
+  if (process.platform === 'win32') return true
+  const uid = process.getuid?.()
+  const file = lstatSync(path)
+  const dir = lstatSync(dirname(path))
+  if (file.isSymbolicLink() || !file.isFile() || dir.isSymbolicLink() || !dir.isDirectory()) return false
+  if (uid !== undefined && (file.uid !== uid || dir.uid !== uid)) return false
+  return (file.mode & 0o022) === 0 && (dir.mode & 0o022) === 0
 }
 
 export function writeAnchor(keyring: Keyring, anchor: Anchor): void {

@@ -64,6 +64,49 @@ export const BUILTIN_SAFE_TOOLS = ['exit_plan_mode', 'propose_run_rules', 'todo_
  */
 export const SANDBOXED_SUBPROCESS_TOOLS = ['bash', 'pwsh', 'run_code']
 
+/** DSH MCP server names (`dsh-mcp-client` serverName). */
+const MCP_SERVER = /^[A-Za-z0-9_-]{1,32}$/
+
+/**
+ * Validate `keyProtection.safeTools`. Entries are trimmed; an empty entry, `*`, any pattern
+ * that would cover every MCP tool (`mcp__*`, `mcp_*`, `m*`, ...), and partial MCP server
+ * prefixes (`mcp__ot*`) are rejected. A wildcard MCP entry must be exactly `mcp__<server>__*`.
+ */
+export function resolveSafeTools(entries: readonly string[]): string[] {
+  const out: string[] = []
+  for (const raw of entries) {
+    const entry = raw.trim()
+    if (entry === '' || entry === '*') throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} is empty or matches every tool`)
+    if (entry.endsWith('*')) {
+      const prefix = entry.slice(0, -1)
+      if (prefix.includes('*')) throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} may contain only one trailing *`)
+      if ('mcp__'.startsWith(prefix)) throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} would vouch for every MCP tool; name the server: mcp__<server>__*`)
+      if (prefix.startsWith('mcp__')) {
+        const server = prefix.endsWith('__') ? prefix.slice('mcp__'.length, -2) : undefined
+        if (server === undefined || !MCP_SERVER.test(server)) throw new Error(`keyProtection.safeTools entry ${JSON.stringify(raw)} must be exactly mcp__<server>__* (server names match [A-Za-z0-9_-]{1,32})`)
+      }
+    }
+    if (!out.includes(entry)) out.push(entry)
+  }
+  return out
+}
+
+/**
+ * Whether a vouched-safe pattern covers a tool. `mcp__<server>__*` matches only tools that can
+ * belong to THAT server: server names may themselves contain "_" or "__", so a public name
+ * whose remainder starts with "_" or contains "__" (e.g. `mcp__otx___x` from server `otx_`, or
+ * `mcp__otx__evil__x` from server `otx__evil`) is ambiguous and is not matched. List such
+ * tools by exact name.
+ */
+export function safePatternMatches(pattern: string, tool: string): boolean {
+  if (!pattern.endsWith('*')) return tool === pattern
+  const prefix = pattern.slice(0, -1)
+  if (!tool.startsWith(prefix)) return false
+  if (!prefix.startsWith('mcp__')) return true
+  const rest = tool.slice(prefix.length)
+  return rest.length > 0 && !rest.startsWith('_') && !rest.includes('__')
+}
+
 export interface Config {
   planFirst?: PlanFirstConfig
   runRules?: RunRulesConfig
@@ -176,8 +219,11 @@ export function resolveGateConfig(input: GateInput): ResolvedConfig {
     const outside = tools.filter((tool) => !allowedTools.includes(tool))
     if (outside.length > 0) throw new Error(`planFirst.planningTools must stay inside runRules.allowedTools: ${outside.join(', ')}`)
   }
+  const safeTools = resolveSafeTools(config.keyProtection.safeTools)
+  const fileReadingTools = [...new Set(config.keyProtection.fileReadingTools.map((tool) => tool.trim()).filter((tool) => tool !== ''))]
   return {
     ...config,
+    keyProtection: { ...config.keyProtection, safeTools, fileReadingTools },
     planFirst: { ...config.planFirst, planningTools: tools, denialMessage },
     runRules: { ...config.runRules, allowedTools, maxLimits: { ...config.runRules.maxLimits } },
   }
@@ -255,7 +301,20 @@ export interface GateTestHooks {
 
 /** Install the durable plan-first and run-rules enforcement gate. */
 export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {}): void {
-  const config = resolveGateConfig(input)
+  let config: ResolvedConfig
+  try {
+    config = resolveGateConfig(input)
+  } catch (error) {
+    // Throwing would leave the entry un-activated and DSH running WITHOUT the gate (fail open).
+    // Refuse every tool instead, with the reason, until the configuration is fixed.
+    const reason = `dsh-viztools gate configuration is invalid (${error instanceof Error ? error.message : String(error)}); every tool is refused until it is fixed`
+    warn(ctx, reason)
+    ctx.on('agent/created', ({ agent }) => {
+      agent.ctx.effect(() => agent.ctx.tools.guard(() => reason), 'dsh-viztools.invalid-config')
+      return undefined
+    })
+    return
+  }
   if (!config.planFirst.enabled && !config.runRules.enabled) return
 
   const workspace = resolve(config.cwd || process.cwd())
@@ -284,7 +343,7 @@ export function apply(ctx: Context, input: GateInput, hooks: GateTestHooks = {})
   const forcedReaders = new Set(config.keyProtection.fileReadingTools)
   const safePatterns = [...BUILTIN_SAFE_TOOLS, ...config.keyProtection.safeTools]
   /** Deny by default: a tool is a reader unless it is vouched safe (and not forced a reader). */
-  const isReader = (tool: string): boolean => forcedReaders.has(tool) || !safePatterns.some((pattern) => pattern.endsWith('*') ? tool.startsWith(pattern.slice(0, -1)) : tool === pattern)
+  const isReader = (tool: string): boolean => forcedReaders.has(tool) || !safePatterns.some((pattern) => safePatternMatches(pattern, tool))
   const subprocessTools = new Set(SANDBOXED_SUBPROCESS_TOOLS)
   /** Probe verdicts per (mode, workspace root): whether tool subprocesses cannot read the key. */
   const probes = new Map<string, boolean | Promise<boolean>>()

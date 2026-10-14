@@ -234,6 +234,40 @@ describe('keyed chain and out-of-workspace anchor (item 1, PoCs)', () => {
   })
 })
 
+describe('keyProtection.safeTools validation and MCP server scoping (8bbc07f LOW 1)', () => {
+  it('trims entries and rejects "", "*", bare "mcp__*" and other all-MCP or partial-server patterns', async () => {
+    const { resolveSafeTools } = await import('../src/gate.js')
+    expect(resolveSafeTools(['  mcp__otx__*  ', 'replay ', 'replay'])).toEqual(['mcp__otx__*', 'replay'])
+    for (const bad of ['', '   ', '*', 'mcp__*', 'mcp_*', 'mcp*', 'm*', 'mcp__ot*', 'mcp__otx_*', 'mcp__**', 'mcp__a b__*']) {
+      expect(() => resolveSafeTools([bad]), bad).toThrow(/safeTools entry/)
+    }
+  })
+
+  it('mcp__<server>__* matches only that server, even when server names contain "_"', async () => {
+    const { safePatternMatches } = await import('../src/gate.js')
+    expect(safePatternMatches('mcp__otx__*', 'mcp__otx__replay_tx_only')).toBe(true)
+    // Server "otx_" (tool "x") and server "otx__evil" (tool "x") must not be vouched by "otx".
+    expect(safePatternMatches('mcp__otx__*', 'mcp__otx___x')).toBe(false)
+    expect(safePatternMatches('mcp__otx__*', 'mcp__otx__evil__x')).toBe(false)
+    expect(safePatternMatches('mcp__otx__*', 'mcp__otxa__x')).toBe(false)
+    expect(safePatternMatches('mcp__otx_a__*', 'mcp__otx_a__x')).toBe(true)
+    expect(safePatternMatches('mcp__otx___x', 'mcp__otx___x')).toBe(true) // exact names still work
+  })
+
+  it('a tool from another server whose name shares the prefix stays a reader through the gate', async () => {
+    const tools = ['replay', 'mcp__otx__diff', 'mcp__otx__evil__read_file']
+    const h = await harness({ planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: tools, maxLimits: {} }, keyProtection: { safeTools: ['replay', 'mcp__otx__*'] } }, { tools })
+    expect((await h.call(await h.agent('ms1'), 'mcp__otx__diff', 'c')).text).toMatch(/but mcp__otx__evil__read_file may read files/)
+  })
+
+  it('an invalid gate configuration refuses every tool instead of leaving DSH ungated', async () => {
+    const h = await harness({ ...otx(), keyProtection: { safeTools: ['*'] } })
+    const agent = await h.agent('ic1')
+    for (const tool of ['bench_status', 'replay', 'exit_plan_mode']) expect((await h.call(agent, tool, `c-${tool}`)).text).toMatch(/gate configuration is invalid .*every tool is refused/)
+    expect(h.ran).toEqual([])
+  })
+})
+
 describe('key readable by tool subprocesses (item 2)', () => {
   const readers = (extra: Partial<GateInput> = {}): GateInput => ({ planFirst: { enabled: false }, runRules: { enabled: true, allowedTools: ['bash', 'replay'], maxLimits: { replay: 2 } }, ...extra })
 

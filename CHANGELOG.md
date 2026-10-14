@@ -4,6 +4,20 @@ All notable project changes are recorded here by roadmap milestone.
 
 ## Unreleased
 
+### Security — LOW follow-ups on 8bbc07f (2026-10-13)
+
+- **`keyProtection.safeTools`:**
+  - entries are trimmed;
+  - `""`, `*`, bare `mcp__*`, and other all-MCP patterns (`mcp_*`, `m*`, …), partial server prefixes (`mcp__ot*`), and malformed servers are rejected;
+  - `mcp__<server>__*` matches only that server: a name whose remainder starts with `_` or contains `__` could belong to a longer server name (`otx_`, `otx__evil`) and is not matched; list such tools exactly.
+- **Invalid gate configuration** now refuses every tool with the reason. Before, it threw, the entry failed to activate, and DSH ran without the gate (fail open).
+- **Key directory:** a group- or world-*writable* key directory (0775, 0777, …) is refused with instructions instead of being silently tightened; read-only exposure (0755) is still tightened with a notice. Anchor files must be regular files owned by the console user and not group- or world-writable, otherwise they are treated as invalid (fail closed).
+- **Report:** a `KeyNotReady` timeout no longer disables reports until restart. The report is retried (up to 12 times, 5 s apart), and later reports load the key normally.
+- **Tests:**
+  - `gate-runtime`: `safeTools` validation, server-scoped matching with `_`-containing servers, a lookalike server's tool staying a reader, invalid config denying all;
+  - `state-store`: 0775/0777/0730 refused and 0755 still tightened, linked or group-writable anchors not trusted. The foreign-owner branch needs root to test; it shares the same check;
+  - `report-resume`: a report waiting on a key that is still being written is retried and then stores its outcome.
+
 ### Security — follow-up on 804fbef (2026-10-13, PoC `r1.ts` reproduced)
 
 - **HIGH 1, same-session replay:** indices must strictly increase across the whole sidecar. A reset is accepted only at `highest index + 1`, never lower, and the next record or reset always takes an index above everything in the file. The anchored head must be the last record, or second-to-last when exactly one record at `head + 1` follows (the crash window). PoC: re-appending the session's own old reset, approval, and wider rules used to widen the rules back. It now leaves the store unsynced, the gate writes a fresh reset, approval and rules are void again, and the narrowing approval is never undone.

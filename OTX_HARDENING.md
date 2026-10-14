@@ -50,10 +50,16 @@ Status: **automated blockers closed; internal acceptance pending** (see `SECURIT
 2. **MEDIUM:** file readers are deny-by-default (`keyProtection.safeTools`), and a probe can never clear in-process readers, `read_mcp_resource`, or MCP tools. Tests: `gate-runtime`. Migration: the OTX console lists `mcp__otx__*` as safe.
 3. **LOW:** the shim is anchored to the real `<head>` (`html.parser`); the key wait no longer blocks; an own 0755 key directory is tightened, and a leaked key file is explained. Tests: `test_managed_view.py`, `state-store`, `gate-runtime`.
 
+## LOW follow-ups on 8bbc07f (2026-10-13)
+
+1. `safeTools` is trimmed and validated, and `mcp__<server>__*` is scoped to exactly that server. An invalid gate config now denies all tools instead of failing open. Tests: `gate-runtime`.
+2. A group- or world-writable key directory is refused rather than tightened; anchor files must be our own, not linked, and not group-writable. Tests: `state-store`.
+3. The report retries after a `KeyNotReady` timeout instead of disabling reports. Tests: `report-resume`.
+
 ## Evidence
 
 ```text
-pnpm check:            158 TypeScript tests, 34 Python tests passed
+pnpm check:            165 TypeScript tests, 34 Python tests passed
 pnpm test:integration: 53/53 checks passed (Chromium + Firefox; restart, resume, repair, live-lease refusal)
 ```
 

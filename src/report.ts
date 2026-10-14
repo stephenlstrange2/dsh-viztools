@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import z from '@deepseek-ai/schemastery'
 import { completedReportKeysFromRecords, reportKey, type ReportChange } from './report-domain.js'
-import { assertKeyDirOutside, defaultKeyDir, loadKeyringAsync, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
+import { assertKeyDirOutside, defaultKeyDir, KeyNotReadyError, loadKeyringAsync, openStateStore, type JsonValue, type Keyring, type StateStore } from './state-store.js'
 import { matchTerminalResult, turnTriggerKey, type PendingTerminalTrigger } from './report-trigger.js'
 import { isSafeSessionId, publishManagedState, readManagedState, REPORT_ROUTE, reportRouteUrl } from './managed-state.js'
 import { serveReport } from './report-route.js'
@@ -154,7 +154,15 @@ function sidecarPath(root: string, sessionId: string, channel: 'gate' | 'report'
 }
 
 /** Plugin-owned report generator, independent of agent skills and marimo code-mode MCP. */
-export function apply(ctx: Context, config: ResolvedConfig): void {
+export interface ReportTestHooks {
+  /** Delay before retrying a report whose key was not ready (default 5 s). */
+  readonly keyRetryDelayMs?: number
+}
+
+/** How many times one report is retried while the key is still being written. */
+export const KEY_NOT_READY_RETRIES = 12
+
+export function apply(ctx: Context, config: ResolvedConfig, hooks: ReportTestHooks = {}): void {
   if (!config.enabled) return
   const cwd = resolve(config.cwd || process.cwd())
   const outputRoot = safePath(cwd, config.outputDir, 'report outputDir')
@@ -203,9 +211,21 @@ export function apply(ctx: Context, config: ResolvedConfig): void {
     for (const notice of keyring.notices ?? []) report('key directory', notice)
   }
 
-  const generate = (agent: Agent, triggerSeq: number, trigger: string): Promise<void> => {
+  const generate = (agent: Agent, triggerSeq: number, trigger: string, attempt = 0): Promise<void> => {
     if (keyring === undefined && keyFailure === undefined) {
       return ensureKeyring().then(() => generate(agent, triggerSeq, trigger), (error: unknown) => {
+        if (error instanceof KeyNotReadyError) {
+          // Transient (the key is still being written): keep reports enabled and retry THIS
+          // report later; never disable reporting until a restart.
+          const sessionId = String(agent.id)
+          if (isSafeSessionId(sessionId)) {
+            void publishManagedState(outputRoot, { status: 'failed', sessionId, reason: `Report key is not ready yet; retrying (${attempt + 1}/${KEY_NOT_READY_RETRIES})`, updatedAt: Date.now() })
+              .catch((publishError: unknown) => report(`could not publish report state for ${sessionId}`, publishError))
+          }
+          if (attempt + 1 >= KEY_NOT_READY_RETRIES) { report(`report for ${sessionId} gave up waiting for the key`, error); return }
+          return new Promise<void>((resolveLater) => { const timer = setTimeout(resolveLater, hooks.keyRetryDelayMs ?? 5_000); timer.unref?.() })
+            .then(() => generate(agent, triggerSeq, trigger, attempt + 1))
+        }
         keyFailure = error instanceof Error ? error.message : String(error)
         return generate(agent, triggerSeq, trigger)
       })
